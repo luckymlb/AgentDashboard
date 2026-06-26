@@ -1,0 +1,31 @@
+AgentDashboard/Sources/Views/MenuBarPopover.swift
+  s_2422372f02f738::t_2d5472c39ca93e 50-52,59-61
+AgentDashboard/Sources/Models/AgentInfo.swift
+  s_2422372f02f738::t_d2ed000d8e97f0 91,95-96,109
+AgentDashboard/Sources/Views/AgentRowView.swift
+  s_2422372f02f738::t_7002a963f53ff5 5,10,32-37,56
+AgentDashboard/Sources/Services/ProcessScanner.swift
+  s_2422372f02f738::t_b0382072a159ab 177-178
+  s_2422372f02f738::t_23020e9c5d9b63 94-99
+  s_2422372f02f738::t_2671e2cc34c33d 10,29-32
+  s_2422372f02f738::t_ea2aed0f84da0b 90
+  s_2422372f02f738::t_d8badff5f41d4f 84
+  s_2422372f02f738::t_4c3f39836497f3 124-125
+  s_2422372f02f738::t_6f174d2bd25d51 33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "887a7e790ca614c8ac31b1ccfb95e1f0bf95da3b",
+  "prompts": {},
+  "sessions": {
+    "s_2422372f02f738": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6f05b73-8639-461f-a750-ef1bfdb3828f",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "malibo <malibo@onero.com>"
+    }
+  }
+}
