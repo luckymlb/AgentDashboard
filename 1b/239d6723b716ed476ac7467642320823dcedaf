@@ -1,0 +1,48 @@
+AgentDashboard/Sources/Services/ITerm2Bridge.swift
+  s_2422372f02f738::t_7e77b68b52caf9 2-10,13-14,16-20,45-46,48-49,55,57-68,70,74-77
+  s_2422372f02f738::t_6e2d35d9bf8d10 78
+AgentDashboard/Sources/Models/AgentInfo.swift
+  s_2422372f02f738::t_6a4405a66360c1 2,9,18-19,41-75
+AgentDashboard/Sources/Services/ProcessScanner.swift
+  s_2422372f02f738::t_bd0182446b80da 3,5-7,17-23,25,27-31,36-40,42-46,50,57-61,65-67,72-74,83,87-90,107,110,140-151,159-165,168-173,188-190,195-201,217,256,280-282,296-297,306,334-339,348,382
+  s_2422372f02f738::t_4ea2c4227c7fca 403-404
+  s_2422372f02f738::t_400b8cb7ea3e9b 47-49,51-56
+  s_2422372f02f738::t_d77f51ea239ed7 69,71,76-82,84,105,108-109,114,156,184-187,203,209,219,246,258,284,351,360,370,400,409
+  s_2422372f02f738::t_584f6e9cae0d86 68
+  s_2422372f02f738::t_349f3415f76981 202
+  s_2422372f02f738::t_480250c43609b5 283
+AgentDashboard/Sources/Views/AgentRowView.swift
+  s_2422372f02f738::t_da4b4f791de8ff 40-42
+  s_2422372f02f738::t_8fb8ec543a0cf1 24,27
+  s_2422372f02f738::t_d8e472e3fc4e39 50
+build.sh
+  s_2422372f02f738::t_b714959cd2fa7e 20-21
+AgentDashboard/Sources/main.swift
+  s_2422372f02f738::t_bd9667427a0e30 3-15
+CLAUDE.md
+  s_2422372f02f738::t_fd4e4c368f133e 1-32
+AgentDashboard/Sources/Views/StatusBadge.swift
+  s_2422372f02f738::t_3870865be688a7 9,12
+AgentDashboard/Sources/Services/TranscriptTailReader.swift
+  s_2422372f02f738::t_7b2c6a851b358e 2-4,7-9,25-42,116,118-126,140,149,156-158
+  s_2422372f02f738::t_e10b0f1c4471c2 159
+AgentDashboard/Sources/AgentDashboardApp.swift
+  s_2422372f02f738::t_f63945aee8d730 7
+  s_2422372f02f738::t_f7a67bbb62fdf6 3,5-6,12,15,30,40,44-49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "1b239d6723b716ed476ac7467642320823dcedaf",
+  "prompts": {},
+  "sessions": {
+    "s_2422372f02f738": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6f05b73-8639-461f-a750-ef1bfdb3828f",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "malibo <malibo@onero.com>"
+    }
+  }
+}
