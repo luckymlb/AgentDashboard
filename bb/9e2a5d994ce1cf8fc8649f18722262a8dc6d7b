@@ -1,0 +1,19 @@
+AgentDashboard/Sources/Services/ProcessScanner.swift
+  s_2422372f02f738::t_56e4c947df944b 32-40
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "bb9e2a5d994ce1cf8fc8649f18722262a8dc6d7b",
+  "prompts": {},
+  "sessions": {
+    "s_2422372f02f738": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6f05b73-8639-461f-a750-ef1bfdb3828f",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "malibo <malibo@onero.com>"
+    }
+  }
+}
