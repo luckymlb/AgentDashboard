@@ -1,0 +1,19 @@
+AgentDashboard/Sources/Services/HookListener.swift
+  s_2422372f02f738::t_f3ebb683193fcd 25-26
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "ec669f6bdbb5a9179fa3f851655531113849903e",
+  "prompts": {},
+  "sessions": {
+    "s_2422372f02f738": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6f05b73-8639-461f-a750-ef1bfdb3828f",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "malibo <malibo@onero.com>"
+    }
+  }
+}
