@@ -91,6 +91,7 @@ class ProcessScanner: ObservableObject {
         let jDir = jobsDir
         let hookStatusSnapshot = hookListener.snapshot()
         let turnStarts = hookListener.turnStartSnapshot()
+        let lastEvents = hookListener.lastEventSnapshot()
         let unreadIds = unreadSessionIds
 
         Task.detached { [weak self] in
@@ -98,7 +99,7 @@ class ProcessScanner: ObservableObject {
                 cwdCache: cachedCwd, cacheTTL: cacheTTL,
                 transcriptReader: reader, sessionsDir: sessDir, jobsDir: jDir,
                 hookStatuses: hookStatusSnapshot, turnStarts: turnStarts,
-                unreadSessionIds: unreadIds
+                lastHookEvents: lastEvents, unreadSessionIds: unreadIds
             )
             await MainActor.run { [weak self] in
                 guard let self = self else { return }
@@ -134,6 +135,7 @@ class ProcessScanner: ObservableObject {
         jobsDir: URL,
         hookStatuses: [String: AgentStatus],
         turnStarts: [String: Date],
+        lastHookEvents: [String: Date],
         unreadSessionIds: Set<String>
     ) -> ScanResult {
         let terminalProcesses = getTerminalProcesses(cwdCache: cwdCache, cacheTTL: cacheTTL)
@@ -186,7 +188,9 @@ class ProcessScanner: ObservableObject {
             }
 
             let lastActive: Double
-            if let sid = sessionId,
+            if let sid = sessionId, let hookTime = lastHookEvents[sid] {
+                lastActive = hookTime.timeIntervalSince1970 * 1000
+            } else if let sid = sessionId,
                let transcriptPath = transcriptReader.findTranscriptPath(sessionId: sid, cwd: sessionCwd),
                let attrs = try? FileManager.default.attributesOfItem(atPath: transcriptPath),
                let mtime = attrs[.modificationDate] as? Date {

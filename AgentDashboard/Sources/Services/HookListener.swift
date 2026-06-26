@@ -12,9 +12,12 @@ class HookListener {
 
     private var statusMap: [String: StatusEntry] = [:]
     private var turnStartMap: [String: Date] = [:]
+    private var lastEventMap: [String: Date] = [:]
     private let staleTTL: TimeInterval = 30
 
     func handleEvent(_ event: HookEvent) {
+        lastEventMap[event.sessionId] = event.timestamp
+
         if event.hookType == .userPromptSubmit {
             turnStartMap[event.sessionId] = event.timestamp
         } else if event.hookType == .stop {
@@ -61,6 +64,10 @@ class HookListener {
 
     func turnStartSnapshot() -> [String: Date] {
         return turnStartMap
+    }
+
+    func lastEventSnapshot() -> [String: Date] {
+        return lastEventMap
     }
 
     private func mapEventToStatus(_ event: HookEvent) -> AgentStatus? {
