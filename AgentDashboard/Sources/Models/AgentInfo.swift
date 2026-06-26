@@ -87,10 +87,11 @@ struct AgentInfo: Identifiable {
     let elapsedSeconds: Int
     let sessionName: String?
     let sessionId: String?
+    let lastActiveAt: Double
 
     init(pid: Int, type: AgentType, tty: String, workingDirectory: String,
          elapsedTime: String, status: AgentStatus,
-         sessionName: String?, sessionId: String?) {
+         sessionName: String?, sessionId: String?, lastActiveAt: Double = 0) {
         self.id = "\(pid)-\(tty)"
         self.pid = pid
         self.type = type
@@ -102,6 +103,7 @@ struct AgentInfo: Identifiable {
         self.status = status
         self.sessionName = sessionName
         self.sessionId = sessionId
+        self.lastActiveAt = lastActiveAt
     }
 
     private static func parseElapsedTime(_ str: String) -> Int {

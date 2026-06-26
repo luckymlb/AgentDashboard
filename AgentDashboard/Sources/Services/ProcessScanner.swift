@@ -126,6 +126,7 @@ class ProcessScanner: ObservableObject {
             let sessionCwd = sessionData?["cwd"] as? String ?? proc.cwd
             let sessionName = sessionData?["name"] as? String
             let kind = sessionData?["kind"] as? String
+            let updatedAt = sessionData?["updatedAt"] as? Double ?? 0
 
             if kind != nil && kind != "interactive" { continue }
 
@@ -165,7 +166,8 @@ class ProcessScanner: ObservableObject {
                 elapsedTime: proc.etime,
                 status: status,
                 sessionName: sessionName,
-                sessionId: sessionId
+                sessionId: sessionId,
+                lastActiveAt: updatedAt
             ))
         }
 
@@ -181,6 +183,9 @@ class ProcessScanner: ObservableObject {
             agents: agents.sorted {
                 if $0.status.sortPriority != $1.status.sortPriority {
                     return $0.status.sortPriority < $1.status.sortPriority
+                }
+                if !$0.status.isActive {
+                    return $0.lastActiveAt > $1.lastActiveAt
                 }
                 return $0.elapsedSeconds < $1.elapsedSeconds
             },
