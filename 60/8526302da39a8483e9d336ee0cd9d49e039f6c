@@ -1,0 +1,34 @@
+AgentDashboard/Sources/Services/HookListener.swift
+  s_2422372f02f738::t_8c437676f2cefe 44-54
+  s_2422372f02f738::t_c5e4fb257f646a 1-16,23-43,56-64,66-93
+  s_2422372f02f738::t_72733344aa1ec8 17-22
+  s_2422372f02f738::t_7e1246bfdf3b9a 55,65
+AgentDashboard/Sources/Services/HookServer.swift
+  s_2422372f02f738::t_0bfae9d43fc325 10,35,97,142-143
+  s_2422372f02f738::t_620778d992d0a9 1-9,11-34,36-69,71-75,94-96,98-141,144-149
+  s_2422372f02f738::t_509e3701d5a3f1 70,76-93
+AgentDashboard/Sources/Models/HookEvent.swift
+  s_2422372f02f738::t_bf1aeba9d8c021 1-27
+AgentDashboard/Sources/Services/ProcessScanner.swift
+  s_2422372f02f738::t_874781ceb52cdc 17-19,22,30,34,40,44,49-51,56,65
+  s_2422372f02f738::t_9d974c1546557d 110-111
+  s_2422372f02f738::t_e45a7ceb83aa74 77,82-83
+  s_2422372f02f738::t_989dd882d4302e 134-136
+  s_2422372f02f738::t_f602d77dbbf3f7 45-48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "608526302da39a8483e9d336ee0cd9d49e039f6c",
+  "prompts": {},
+  "sessions": {
+    "s_2422372f02f738": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6f05b73-8639-461f-a750-ef1bfdb3828f",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "malibo <malibo@onero.com>"
+    }
+  }
+}
