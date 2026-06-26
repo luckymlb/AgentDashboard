@@ -1,0 +1,23 @@
+AgentDashboard/Sources/Models/AgentInfo.swift
+  s_2422372f02f738::t_eba856c2997094 90,94,106
+AgentDashboard/Sources/Services/ProcessScanner.swift
+  s_2422372f02f738::t_5c1f0e9fe254c6 129
+  s_2422372f02f738::t_ea955369db7a63 169-170
+  s_2422372f02f738::t_af303c61dc7ce3 187-189
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "cd8972ac19d392b4c1b62894ef3f93500ac87d53",
+  "prompts": {},
+  "sessions": {
+    "s_2422372f02f738": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6f05b73-8639-461f-a750-ef1bfdb3828f",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "malibo <malibo@onero.com>"
+    }
+  }
+}
