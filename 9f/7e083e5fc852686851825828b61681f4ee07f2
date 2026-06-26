@@ -1,0 +1,19 @@
+CLAUDE.md
+  s_2422372f02f738::t_55c730d17b1e9a 31
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "9f7e083e5fc852686851825828b61681f4ee07f2",
+  "prompts": {},
+  "sessions": {
+    "s_2422372f02f738": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6f05b73-8639-461f-a750-ef1bfdb3828f",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "malibo <malibo@onero.com>"
+    }
+  }
+}
