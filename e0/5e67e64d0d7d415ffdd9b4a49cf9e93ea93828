@@ -1,0 +1,29 @@
+AgentDashboard/Sources/Services/ProcessScanner.swift
+  s_2422372f02f738::t_19ffb34d432033 84,91-92
+  s_2422372f02f738::t_57245ccae60b61 171,175,177-178,184
+  s_2422372f02f738::t_7f65fbb2acaaf9 127
+  s_2422372f02f738::t_262fefd2fa6035 485-501
+  s_2422372f02f738::t_df38cf6e3d63e5 172-173
+  s_2422372f02f738::t_c8a0f6f70f6995 174,176
+AgentDashboard/Sources/Services/HookListener.swift
+  s_2422372f02f738::t_87cc80d9533774 14,18-23
+  s_2422372f02f738::t_ef85e32a521910 62-65
+AgentDashboard/Sources/Views/AgentRowView.swift
+  s_2422372f02f738::t_20e2b55cd36402 48-52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "e05e67e64d0d7d415ffdd9b4a49cf9e93ea93828",
+  "prompts": {},
+  "sessions": {
+    "s_2422372f02f738": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6f05b73-8639-461f-a750-ef1bfdb3828f",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": null
+    }
+  }
+}
