@@ -1,0 +1,21 @@
+README.md
+  s_2422372f02f738::t_5654852084c0ff 1-64
+.gitignore
+  s_2422372f02f738::t_595d77bb2b5cc5 1-6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "4804d52cd4ab7591109083f50a4b92573f4c73a7",
+  "prompts": {},
+  "sessions": {
+    "s_2422372f02f738": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6f05b73-8639-461f-a750-ef1bfdb3828f",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "malibo <malibo@onero.com>"
+    }
+  }
+}
