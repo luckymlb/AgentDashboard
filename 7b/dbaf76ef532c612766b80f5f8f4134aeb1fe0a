@@ -1,0 +1,21 @@
+AgentDashboard/Sources/Services/TranscriptTailReader.swift
+  s_2422372f02f738::t_db81150721f378 156-185
+AgentDashboard/Sources/Services/ProcessScanner.swift
+  s_2422372f02f738::t_d4d1084cb2c956 194-197
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "7bdbaf76ef532c612766b80f5f8f4134aeb1fe0a",
+  "prompts": {},
+  "sessions": {
+    "s_2422372f02f738": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6f05b73-8639-461f-a750-ef1bfdb3828f",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "malibo <malibo@onero.com>"
+    }
+  }
+}
