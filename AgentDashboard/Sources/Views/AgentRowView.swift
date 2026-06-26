@@ -28,7 +28,7 @@ struct AgentRowView: View {
                                 .cornerRadius(3)
                         }
                     }
-                    Text(agent.workingDirectory.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                    Text(shortPath)
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .lineLimit(1)
@@ -45,12 +45,22 @@ struct AgentRowView: View {
             .padding(.vertical, 6)
             .background(isHovered ? Color.primary.opacity(0.06) : Color.clear)
             .cornerRadius(6)
+            .opacity(agent.status.isActive || isHovered ? 1.0 : 0.55)
         }
         .buttonStyle(.plain)
-        .help("tty: \(agent.tty)")
+        .help(agent.workingDirectory.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
         .onHover { hovering in
             isHovered = hovering
         }
     }
 
+    private var shortPath: String {
+        let full = agent.workingDirectory
+        let components = full.components(separatedBy: "/").filter { !$0.isEmpty }
+        if components.count <= 2 {
+            return "~/\(components.joined(separator: "/"))"
+        }
+        let last2 = components.suffix(2).joined(separator: "/")
+        return "…/\(last2)"
+    }
 }

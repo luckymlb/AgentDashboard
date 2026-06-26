@@ -3,6 +3,14 @@ import SwiftUI
 struct MenuBarPopover: View {
     @ObservedObject var scanner: ProcessScanner
 
+    private var activeAgents: [AgentInfo] {
+        scanner.agents.filter { $0.status.isActive }
+    }
+
+    private var idleAgents: [AgentInfo] {
+        scanner.agents.filter { !$0.status.isActive }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
@@ -36,19 +44,16 @@ struct MenuBarPopover: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
-                        let claudeAgents = scanner.agents.filter { $0.type == .claude }
-                        let codexAgents = scanner.agents.filter { $0.type == .codex }
-
-                        if !claudeAgents.isEmpty {
-                            SectionHeader(title: "Claude", count: claudeAgents.count)
-                            ForEach(claudeAgents) { agent in
+                        if !activeAgents.isEmpty {
+                            SectionHeader(title: "Active", count: activeAgents.count)
+                            ForEach(activeAgents) { agent in
                                 AgentRowView(agent: agent)
                             }
                         }
 
-                        if !codexAgents.isEmpty {
-                            SectionHeader(title: "Codex", count: codexAgents.count)
-                            ForEach(codexAgents) { agent in
+                        if !idleAgents.isEmpty {
+                            SectionHeader(title: "Idle", count: idleAgents.count)
+                            ForEach(idleAgents) { agent in
                                 AgentRowView(agent: agent)
                             }
                         }
@@ -60,14 +65,12 @@ struct MenuBarPopover: View {
 
                 // Footer
                 HStack {
-                    let total = scanner.agents.count
-                    let active = scanner.agents.filter { $0.status.isActive }.count
-                    Text("\(total) agents")
+                    Text("\(scanner.agents.count) agents")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Text("·")
                         .foregroundColor(.secondary)
-                    Text("\(active) active")
+                    Text("\(activeAgents.count) active")
                         .font(.caption)
                         .foregroundColor(.green)
                     Spacer()

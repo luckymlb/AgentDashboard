@@ -16,13 +16,27 @@ class ProcessScanner: ObservableObject {
 
     private var scanTimer: Timer?
     private var isScanning = false
+    private var pollingInterval: TimeInterval = 5.0
 
     // cwd cache: pid -> (cwd, timestamp)
     private var cwdCache: [Int: (path: String, time: Date)] = [:]
     private let cwdCacheTTL: TimeInterval = 30
 
-    func startScanning(interval: TimeInterval = 2.0) {
+    enum PollingMode {
+        case active      // popover visible, 2s
+        case background  // popover hidden, 5s
+    }
+
+    func setPollingMode(_ mode: PollingMode) {
+        let newInterval: TimeInterval = mode == .active ? 2.0 : 5.0
+        guard newInterval != pollingInterval else { return }
+        pollingInterval = newInterval
+        startScanning(interval: newInterval)
+    }
+
+    func startScanning(interval: TimeInterval = 5.0) {
         scanTimer?.invalidate()
+        pollingInterval = interval
 
         scan()
 
@@ -146,7 +160,12 @@ class ProcessScanner: ObservableObject {
         }
 
         return ScanResult(
-            agents: agents.sorted { $0.status < $1.status },
+            agents: agents.sorted {
+                if $0.status.sortPriority != $1.status.sortPriority {
+                    return $0.status.sortPriority < $1.status.sortPriority
+                }
+                return $0.elapsedSeconds < $1.elapsedSeconds
+            },
             updatedCwdCache: newCwdCache
         )
     }

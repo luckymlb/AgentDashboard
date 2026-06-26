@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 import os
 
 private let logger = Logger(subsystem: "com.lucky.AgentDashboard", category: "App")
@@ -9,7 +10,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private let scanner = ProcessScanner()
-    private var updateTimer: Timer?
+    private var cancellable: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         logger.info("applicationDidFinishLaunching")
@@ -37,16 +38,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             rootView: MenuBarPopover(scanner: scanner)
         )
 
-        updateTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            self?.updateStatusIcon()
-        }
-        updateStatusIcon()
+        // Drive menu bar badge directly from @Published agents
+        cancellable = scanner.$agents
+            .map { $0.filter { $0.status.isActive }.count }
+            .removeDuplicates()
+            .sink { [weak self] activeCount in
+                guard let button = self?.statusItem.button else { return }
+                button.title = activeCount > 0 ? " \(activeCount)" : ""
+            }
+
         logger.info("Setup complete")
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        updateTimer?.invalidate()
         scanner.stopScanning()
+        cancellable?.cancel()
     }
 
     @objc func togglePopover() {
@@ -54,20 +60,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         if popover.isShown {
             popover.performClose(nil)
+            scanner.setPollingMode(.background)
         } else {
+            scanner.setPollingMode(.active)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
-        }
-    }
-
-    private func updateStatusIcon() {
-        let activeCount = scanner.agents.filter { $0.status.isActive }.count
-        if let button = statusItem.button {
-            if activeCount > 0 {
-                button.title = " \(activeCount)"
-            } else {
-                button.title = ""
-            }
         }
     }
 }

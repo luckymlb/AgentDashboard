@@ -84,6 +84,7 @@ struct AgentInfo: Identifiable {
     let projectName: String
     let status: AgentStatus
     let elapsedTime: String
+    let elapsedSeconds: Int
     let sessionName: String?
     let sessionId: String?
 
@@ -97,8 +98,27 @@ struct AgentInfo: Identifiable {
         self.workingDirectory = workingDirectory
         self.projectName = URL(fileURLWithPath: workingDirectory).lastPathComponent
         self.elapsedTime = elapsedTime
+        self.elapsedSeconds = AgentInfo.parseElapsedTime(elapsedTime)
         self.status = status
         self.sessionName = sessionName
         self.sessionId = sessionId
+    }
+
+    private static func parseElapsedTime(_ str: String) -> Int {
+        var total = 0
+        let scanner = str.lowercased()
+        let parts = scanner.components(separatedBy: " ")
+        for part in parts {
+            if part.hasSuffix("d") {
+                total += (Int(part.dropLast()) ?? 0) * 86400
+            } else if part.hasSuffix("h") {
+                total += (Int(part.dropLast()) ?? 0) * 3600
+            } else if part.hasSuffix("m") {
+                total += (Int(part.dropLast()) ?? 0) * 60
+            } else if part.hasSuffix("s") {
+                total += Int(part.dropLast()) ?? 0
+            }
+        }
+        return total
     }
 }

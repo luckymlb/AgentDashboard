@@ -3,9 +3,9 @@ import os
 
 private let logger = Logger(subsystem: "com.lucky.AgentDashboard", category: "TranscriptTailReader")
 
-class TranscriptTailReader {
+final class TranscriptTailReader: @unchecked Sendable {
     private let tailBytes: Int = 65536
-
+    private let queue = DispatchQueue(label: "com.lucky.AgentDashboard.transcriptCache")
     private var pathCache: [String: String] = [:]
 
     func inferActivity(transcriptPath: String) -> AgentStatus? {
@@ -22,7 +22,6 @@ class TranscriptTailReader {
 
         let tailData = fileHandle.readDataToEndOfFile()
 
-        // Fix #6: find the first newline boundary to avoid splitting a multi-byte UTF-8 char
         let validData: Data
         if offset > 0 {
             if let newlineIndex = tailData.firstIndex(of: 0x0A) {
@@ -113,15 +112,15 @@ class TranscriptTailReader {
         }
     }
 
-    /// Locate transcript path with caching (#10)
     func findTranscriptPath(sessionId: String, cwd: String) -> String? {
         let cacheKey = sessionId
 
-        if let cached = pathCache[cacheKey] {
+        let cached: String? = queue.sync { pathCache[cacheKey] }
+        if let cached = cached {
             if FileManager.default.fileExists(atPath: cached) {
                 return cached
             }
-            pathCache.removeValue(forKey: cacheKey)
+            queue.sync { _ = pathCache.removeValue(forKey: cacheKey) }
         }
 
         let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
@@ -137,7 +136,7 @@ class TranscriptTailReader {
             if entry == encodedPath || entry.hasSuffix(encodedPath) {
                 let transcriptPath = "\(projectsDir)/\(entry)/\(sessionId).jsonl"
                 if FileManager.default.fileExists(atPath: transcriptPath) {
-                    pathCache[cacheKey] = transcriptPath
+                    queue.sync { pathCache[cacheKey] = transcriptPath }
                     return transcriptPath
                 }
             }
@@ -146,7 +145,7 @@ class TranscriptTailReader {
         for entry in entries {
             let transcriptPath = "\(projectsDir)/\(entry)/\(sessionId).jsonl"
             if FileManager.default.fileExists(atPath: transcriptPath) {
-                pathCache[cacheKey] = transcriptPath
+                queue.sync { pathCache[cacheKey] = transcriptPath }
                 return transcriptPath
             }
         }
@@ -155,6 +154,6 @@ class TranscriptTailReader {
     }
 
     func clearCache() {
-        pathCache.removeAll()
+        queue.sync { pathCache.removeAll() }
     }
 }
