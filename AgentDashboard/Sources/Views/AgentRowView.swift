@@ -21,10 +21,10 @@ struct AgentRowView: View {
                         if agent.status.isActive {
                             Text(agent.status.label)
                                 .font(.caption2)
-                                .foregroundColor(statusLabelColor)
+                                .foregroundColor(agent.status.color)
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 1)
-                                .background(statusLabelColor.opacity(0.12))
+                                .background(agent.status.color.opacity(0.12))
                                 .cornerRadius(3)
                         }
                     }
@@ -37,14 +37,9 @@ struct AgentRowView: View {
 
                 Spacer()
 
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text(agent.elapsedTime)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                    Text(agent.tty)
-                        .font(.caption2)
-                        .foregroundColor(.secondary.opacity(0.7))
-                }
+                Text(agent.elapsedTime)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
@@ -52,23 +47,10 @@ struct AgentRowView: View {
             .cornerRadius(6)
         }
         .buttonStyle(.plain)
+        .help("tty: \(agent.tty)")
         .onHover { hovering in
             isHovered = hovering
         }
     }
 
-    private var statusLabelColor: Color {
-        switch agent.status {
-        case .thinking:   return .purple
-        case .crafting:   return .blue
-        case .running:    return .green
-        case .reading:    return .cyan
-        case .editing, .writing: return .orange
-        case .searching:  return .yellow
-        case .processing: return .mint
-        case .busy:       return .green
-        case .waiting:    return .gray
-        case .idle:       return .gray
-        }
-    }
 }

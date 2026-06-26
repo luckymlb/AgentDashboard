@@ -1,11 +1,13 @@
 import Foundation
+import os
 
-/// Reads the tail of a JSONL transcript file to infer fine-grained activity status.
+private let logger = Logger(subsystem: "com.lucky.AgentDashboard", category: "TranscriptTailReader")
+
 class TranscriptTailReader {
-    private let tailBytes: Int = 65536 // 64KB tail read
+    private let tailBytes: Int = 65536
 
-    /// Infer activity from transcript file.
-    /// Returns nil if file doesn't exist or cannot be parsed.
+    private var pathCache: [String: String] = [:]
+
     func inferActivity(transcriptPath: String) -> AgentStatus? {
         let url = URL(fileURLWithPath: transcriptPath)
         guard let fileHandle = try? FileHandle(forReadingFrom: url) else { return nil }
@@ -19,12 +21,27 @@ class TranscriptTailReader {
         fileHandle.seek(toFileOffset: offset)
 
         let tailData = fileHandle.readDataToEndOfFile()
-        guard let tailString = String(data: tailData, encoding: .utf8) else { return nil }
 
-        // Split by newlines, process from the end
+        // Fix #6: find the first newline boundary to avoid splitting a multi-byte UTF-8 char
+        let validData: Data
+        if offset > 0 {
+            if let newlineIndex = tailData.firstIndex(of: 0x0A) {
+                let startIndex = tailData.index(after: newlineIndex)
+                validData = tailData[startIndex...]
+            } else {
+                validData = tailData
+            }
+        } else {
+            validData = tailData
+        }
+
+        guard let tailString = String(data: validData, encoding: .utf8) else {
+            logger.warning("Failed to decode transcript tail as UTF-8: \(transcriptPath)")
+            return nil
+        }
+
         let lines = tailString.components(separatedBy: "\n").filter { !$0.isEmpty }
 
-        // Scan from the last line backward to find the most recent meaningful event
         for i in stride(from: lines.count - 1, through: max(0, lines.count - 20), by: -1) {
             guard let data = lines[i].data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -50,7 +67,6 @@ class TranscriptTailReader {
             return .busy
         }
 
-        // Per Codex review: take the LAST element (represents latest activity)
         guard let lastBlock = content.last,
               let blockType = lastBlock["type"] as? String else {
             return .busy
@@ -60,7 +76,6 @@ class TranscriptTailReader {
         case "thinking":
             return .thinking
         case "text":
-            // text without tool_use means crafting response
             let hasToolUse = content.contains { ($0["type"] as? String) == "tool_use" }
             return hasToolUse ? .busy : .crafting
         case "tool_use":
@@ -88,7 +103,6 @@ class TranscriptTailReader {
              _ where toolName.contains("search"):
             return .searching
         default:
-            // MCP tools and others - check for patterns
             if toolName.contains("search") || toolName.contains("Grep") || toolName.contains("Glob") {
                 return .searching
             }
@@ -99,9 +113,17 @@ class TranscriptTailReader {
         }
     }
 
-    /// Locate the transcript JSONL path for a given session.
-    /// Claude stores transcripts at: ~/.claude/projects/{encoded-project-path}/{sessionId}.jsonl
+    /// Locate transcript path with caching (#10)
     func findTranscriptPath(sessionId: String, cwd: String) -> String? {
+        let cacheKey = sessionId
+
+        if let cached = pathCache[cacheKey] {
+            if FileManager.default.fileExists(atPath: cached) {
+                return cached
+            }
+            pathCache.removeValue(forKey: cacheKey)
+        }
+
         let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
         let projectsDir = "\(homeDir)/.claude/projects"
 
@@ -109,27 +131,30 @@ class TranscriptTailReader {
             return nil
         }
 
-        // The project directory name is the cwd path with / replaced by -
-        // e.g. /Users/lucky/Desktop/AI/AgentDashboard -> -Users-lucky-Desktop-AI-AgentDashboard
         let encodedPath = cwd.replacingOccurrences(of: "/", with: "-")
 
         for entry in entries {
             if entry == encodedPath || entry.hasSuffix(encodedPath) {
                 let transcriptPath = "\(projectsDir)/\(entry)/\(sessionId).jsonl"
                 if FileManager.default.fileExists(atPath: transcriptPath) {
+                    pathCache[cacheKey] = transcriptPath
                     return transcriptPath
                 }
             }
         }
 
-        // Fallback: search all project dirs for the session file
         for entry in entries {
             let transcriptPath = "\(projectsDir)/\(entry)/\(sessionId).jsonl"
             if FileManager.default.fileExists(atPath: transcriptPath) {
+                pathCache[cacheKey] = transcriptPath
                 return transcriptPath
             }
         }
 
         return nil
+    }
+
+    func clearCache() {
+        pathCache.removeAll()
     }
 }

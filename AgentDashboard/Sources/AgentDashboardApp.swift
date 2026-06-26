@@ -1,19 +1,22 @@
 import SwiftUI
 import AppKit
+import os
 
+private let logger = Logger(subsystem: "com.lucky.AgentDashboard", category: "App")
+
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private let scanner = ProcessScanner()
+    private var updateTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSLog("AgentDashboard: applicationDidFinishLaunching called")
+        logger.info("applicationDidFinishLaunching")
 
         scanner.startScanning()
-        NSLog("AgentDashboard: scanner started, agents count = \(scanner.agents.count)")
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        NSLog("AgentDashboard: statusItem created = \(statusItem != nil)")
 
         if let button = statusItem.button {
             button.title = "AG"
@@ -23,9 +26,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.imagePosition = .imageLeading
             button.action = #selector(togglePopover)
             button.target = self
-            NSLog("AgentDashboard: button configured")
         } else {
-            NSLog("AgentDashboard: ERROR - button is nil")
+            logger.error("statusItem.button is nil")
         }
 
         popover = NSPopover()
@@ -35,11 +37,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             rootView: MenuBarPopover(scanner: scanner)
         )
 
-        Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             self?.updateStatusIcon()
         }
         updateStatusIcon()
-        NSLog("AgentDashboard: setup complete")
+        logger.info("Setup complete")
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        updateTimer?.invalidate()
+        scanner.stopScanning()
     }
 
     @objc func togglePopover() {
