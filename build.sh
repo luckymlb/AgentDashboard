@@ -17,8 +17,10 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 cp ".build/debug/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
-# Always copy from the canonical source
+# Always copy from the canonical source; convert to binary plist so CoreFoundation
+# parses it cleanly (a JSON-formatted Info.plist triggers NSCocoaErrorDomain -3840).
 cp "$SCRIPT_DIR/AgentDashboard/Resources/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
+plutil -convert binary1 "$APP_BUNDLE/Contents/Info.plist"
 
 echo "Done! App bundle at: $APP_BUNDLE"
 echo ""
