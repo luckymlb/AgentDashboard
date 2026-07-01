@@ -20,10 +20,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem.button {
-            button.title = "AG"
             let image = NSImage(systemSymbolName: "pawprint.fill", accessibilityDescription: "Agent Dashboard")
             let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
-            button.image = image?.withSymbolConfiguration(config)
+            // withSymbolConfiguration can return nil for some symbol/config combos;
+            // fall back to the base image so the menu bar item is never blank.
+            button.image = image?.withSymbolConfiguration(config) ?? image
+            button.image?.isTemplate = true
             button.imagePosition = .imageLeading
             button.action = #selector(togglePopover)
             button.target = self
