@@ -6,12 +6,14 @@ enum HookType: String, Sendable {
     case postToolUseFailure = "PostToolUseFailure"
     case stop = "Stop"
     case userPromptSubmit = "UserPromptSubmit"
+    case notification = "Notification"
 }
 
 struct HookEvent: Sendable {
     let hookType: HookType
     let sessionId: String
     let toolName: String?
+    let message: String?
     let timestamp: Date
 
     init?(queryType: String, json: [String: Any]) {
@@ -23,5 +25,6 @@ struct HookEvent: Sendable {
         guard !self.sessionId.isEmpty else { return nil }
 
         self.toolName = json["tool_name"] as? String
+        self.message = json["message"] as? String
     }
 }

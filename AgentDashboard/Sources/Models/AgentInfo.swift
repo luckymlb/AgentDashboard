@@ -7,6 +7,7 @@ enum AgentType: String, CaseIterable {
 }
 
 enum AgentStatus {
+    case confirming
     case thinking
     case crafting
     case running
@@ -21,6 +22,7 @@ enum AgentStatus {
 
     var label: String {
         switch self {
+        case .confirming: return "Confirming"
         case .thinking:   return "Thinking"
         case .crafting:   return "Crafting"
         case .running:    return "Running"
@@ -41,6 +43,7 @@ enum AgentStatus {
 
     var sortPriority: Int {
         switch self {
+        case .confirming: return -1
         case .thinking:   return 0
         case .crafting:   return 1
         case .running:    return 2
@@ -57,6 +60,7 @@ enum AgentStatus {
 
     var color: Color {
         switch self {
+        case .confirming:        return .red
         case .thinking:          return .purple
         case .crafting:          return .blue
         case .running, .busy:    return .green
