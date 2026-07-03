@@ -59,7 +59,7 @@ struct AgentRowView: View {
             .padding(.vertical, 6)
             .background(
                 agent.status == .confirming
-                    ? Color.red.opacity(0.12)
+                    ? agent.status.color.opacity(0.12)
                     : (isHovered ? Color.primary.opacity(0.06) : Color.clear)
             )
             .cornerRadius(6)

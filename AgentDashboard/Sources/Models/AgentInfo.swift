@@ -60,7 +60,7 @@ enum AgentStatus {
 
     var color: Color {
         switch self {
-        case .confirming:        return .red
+        case .confirming:        return .orange
         case .thinking:          return .purple
         case .crafting:          return .blue
         case .running, .busy:    return .green
