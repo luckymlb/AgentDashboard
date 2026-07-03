@@ -42,16 +42,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hostingController.sizingOptions = [.preferredContentSize]
         popover.contentViewController = hostingController
 
-        // Drive menu bar badge directly from @Published agents
+        // Drive menu bar icon + badge directly from @Published agents.
+        // 有 agent 等权限确认时,图标切红色感叹号醒目提示。
         cancellable = scanner.$agents
-            .map { $0.filter { $0.status.isActive }.count }
-            .removeDuplicates()
-            .sink { [weak self] activeCount in
-                guard let button = self?.statusItem.button else { return }
-                button.title = activeCount > 0 ? " \(activeCount)" : ""
+            .sink { [weak self] agents in
+                guard let self, let button = self.statusItem.button else { return }
+                let active = agents.filter { $0.status.isActive }.count
+                let hasConfirming = agents.contains { $0.status == .confirming }
+                button.title = active > 0 ? " \(active)" : ""
+                self.updateStatusBarIcon(button: button, hasConfirming: hasConfirming)
             }
 
         logger.info("Setup complete")
+    }
+
+    /// 菜单栏图标:有 agent 等权限确认时整体变橙色温暖提示,否则正常爪印。
+    /// 保持爪印标识不变,用颜色(而非"错误感"的红色感叹号)表达"需要关注"。
+    private func updateStatusBarIcon(button: NSStatusBarButton, hasConfirming: Bool) {
+        let image = NSImage(systemSymbolName: "pawprint.fill", accessibilityDescription: "Agent Dashboard")
+        let baseConfig = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
+        if hasConfirming {
+            let orangeConfig = NSImage.SymbolConfiguration(hierarchicalColor: .systemOrange)
+            button.image = image?.withSymbolConfiguration(baseConfig)?.withSymbolConfiguration(orangeConfig)
+            button.image?.isTemplate = false
+        } else {
+            button.image = image?.withSymbolConfiguration(baseConfig) ?? image
+            button.image?.isTemplate = true
+        }
+        button.imagePosition = .imageLeading
     }
 
     func applicationWillTerminate(_ notification: Notification) {
