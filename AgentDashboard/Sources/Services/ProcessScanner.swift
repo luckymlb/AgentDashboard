@@ -14,6 +14,7 @@ class ProcessScanner: ObservableObject {
     private let jobsDir = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".claude/jobs")
     private let transcriptReader = TranscriptTailReader()
+    private let tokenStatsReader = TokenStatsReader()
 
     private let hookServer = HookServer()
     private let hookListener = HookListener()
@@ -35,7 +36,8 @@ class ProcessScanner: ObservableObject {
                 pid: old.pid, type: old.type, tty: old.tty,
                 workingDirectory: old.workingDirectory, elapsedTime: old.elapsedTime,
                 status: old.status, sessionName: old.sessionName,
-                sessionId: old.sessionId, lastActiveAt: old.lastActiveAt, hasUnread: false
+                sessionId: old.sessionId, lastActiveAt: old.lastActiveAt, hasUnread: false,
+                tokenUsage: old.tokenUsage
             )
         }
     }
@@ -89,6 +91,7 @@ class ProcessScanner: ObservableObject {
         let cachedCwd = cwdCache
         let cacheTTL = cwdCacheTTL
         let reader = transcriptReader
+        let tokenStats = tokenStatsReader
         let sessDir = sessionsDir
         let jDir = jobsDir
         let hookStatusSnapshot = hookListener.snapshot()
@@ -101,7 +104,8 @@ class ProcessScanner: ObservableObject {
                 cwdCache: cachedCwd, cacheTTL: cacheTTL,
                 transcriptReader: reader, sessionsDir: sessDir, jobsDir: jDir,
                 hookStatuses: hookStatusSnapshot, turnStarts: turnStarts,
-                lastHookEvents: lastEvents, unreadSessionIds: unreadIds
+                lastHookEvents: lastEvents, unreadSessionIds: unreadIds,
+                tokenStatsReader: tokenStats
             )
             await MainActor.run { [weak self] in
                 guard let self = self else { return }
@@ -113,6 +117,7 @@ class ProcessScanner: ObservableObject {
 
                 self.agents = results.agents
                 self.cwdCache = results.updatedCwdCache
+                self.tokenStatsReader.prune(keeping: results.usedTranscriptPaths)
                 self.isScanning = false
             }
         }
@@ -127,6 +132,7 @@ class ProcessScanner: ObservableObject {
     private struct ScanResult: Sendable {
         let agents: [AgentInfo]
         let updatedCwdCache: [Int: (path: String, time: Date)]
+        let usedTranscriptPaths: Set<String>
     }
 
     private nonisolated static func performScan(
@@ -138,12 +144,14 @@ class ProcessScanner: ObservableObject {
         hookStatuses: [String: AgentStatus],
         turnStarts: [String: Date],
         lastHookEvents: [String: Date],
-        unreadSessionIds: Set<String>
+        unreadSessionIds: Set<String>,
+        tokenStatsReader: TokenStatsReader
     ) -> ScanResult {
         let terminalProcesses = getTerminalProcesses(cwdCache: cwdCache, cacheTTL: cacheTTL)
         let allSessions = loadAllSessions(sessionsDir: sessionsDir)
 
         var agents: [AgentInfo] = []
+        var usedTranscriptPaths: Set<String> = []
         var newCwdCache = cwdCache
 
         for proc in terminalProcesses.processes {
@@ -219,6 +227,15 @@ class ProcessScanner: ObservableObject {
                 lastActive = childLastActive
             }
 
+            let tokenUsage: TokenUsage?
+            if proc.type == .claude, let sid = sessionId,
+               let transcriptPath = transcriptReader.findTranscriptPath(sessionId: sid, cwd: sessionCwd) {
+                tokenUsage = tokenStatsReader.accumulate(transcriptPath: transcriptPath)
+                usedTranscriptPaths.insert(transcriptPath)
+            } else {
+                tokenUsage = nil
+            }
+
             agents.append(AgentInfo(
                 pid: proc.pid,
                 type: proc.type,
@@ -229,7 +246,8 @@ class ProcessScanner: ObservableObject {
                 sessionName: sessionName,
                 sessionId: sessionId,
                 lastActiveAt: lastActive,
-                hasUnread: unreadSessionIds.contains(sessionId ?? "")
+                hasUnread: unreadSessionIds.contains(sessionId ?? ""),
+                tokenUsage: tokenUsage
             ))
         }
 
@@ -254,7 +272,8 @@ class ProcessScanner: ObservableObject {
                 }
                 return $0.elapsedSeconds < $1.elapsedSeconds
             },
-            updatedCwdCache: newCwdCache
+            updatedCwdCache: newCwdCache,
+            usedTranscriptPaths: usedTranscriptPaths
         )
     }
 
