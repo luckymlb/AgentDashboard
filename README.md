@@ -55,6 +55,12 @@ open build/AgentDashboard.app
         "matcher": "*",
         "hooks": [{"type": "command", "command": "curl -s -X POST -H 'Content-Type: application/json' -d @- 'http://127.0.0.1:8765/hook?type=UserPromptSubmit' --max-time 1 2>/dev/null || true"}]
       }
+    ],
+    "Notification": [
+      {
+        "matcher": "*",
+        "hooks": [{"type": "command", "command": "curl -s -X POST -H 'Content-Type: application/json' -d @- 'http://127.0.0.1:8765/hook?type=Notification' --max-time 1 2>/dev/null || true"}]
+      }
     ]
   }
 }
