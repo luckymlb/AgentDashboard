@@ -94,6 +94,26 @@ struct MenuBarPopover: View {
             }
         }
         .frame(width: 360)
+        .overlayPreferenceValue(HoveredTokenPreferenceKey.self) { info in
+            if let info = info {
+                GeometryReader { proxy in
+                    let rect = proxy[info.anchor]
+                    let gap: CGFloat = 6
+                    // 上方空间不足(首行)则翻向下方,避免被面板顶边裁掉。
+                    let above = rect.minY > 120
+                    TokenInfoCard(usage: info.usage)
+                        .allowsHitTesting(false)
+                        .fixedSize()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity,
+                               alignment: above ? .bottomTrailing : .topTrailing)
+                        .offset(
+                            x: rect.maxX - proxy.size.width,
+                            y: above ? rect.minY - gap - proxy.size.height : rect.maxY + gap
+                        )
+                }
+                .allowsHitTesting(false)
+            }
+        }
     }
 }
 

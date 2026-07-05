@@ -4,6 +4,8 @@ struct AgentRowView: View {
     let agent: AgentInfo
     var onRead: (() -> Void)?
     @State private var isHovered = false
+    @State private var showTokenInfo = false
+    @State private var infoHoverTask: Task<Void, Never>?
 
     var body: some View {
         Button(action: {
@@ -45,14 +47,27 @@ struct AgentRowView: View {
 
                 Spacer()
 
-                if !agent.elapsedTime.isEmpty {
-                    Text(agent.elapsedTime)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                } else if !agent.status.isActive, agent.lastActiveAt > 0 {
-                    Text(relativeTime(agent.lastActiveAt))
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
+                VStack(alignment: .trailing, spacing: 2) {
+                    if let usage = agent.tokenUsage {
+                        Text("\(usage.formattedTotal) tok")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .monospacedDigit()
+                    }
+                    if !agent.elapsedTime.isEmpty {
+                        Text(agent.elapsedTime)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    } else if !agent.status.isActive, agent.lastActiveAt > 0 {
+                        Text(relativeTime(agent.lastActiveAt))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .onHover { handleInfoHover($0) }
+                .anchorPreference(key: HoveredTokenPreferenceKey.self, value: .bounds) { anchor in
+                    guard showTokenInfo, let usage = agent.tokenUsage else { return nil }
+                    return HoveredTokenInfo(usage: usage, anchor: anchor)
                 }
             }
             .padding(.horizontal, 12)
@@ -64,11 +79,26 @@ struct AgentRowView: View {
             )
             .cornerRadius(6)
             .opacity(agent.status.isActive || agent.hasUnread || isHovered ? 1.0 : 0.55)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(agent.workingDirectory.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
         .onHover { hovering in
             isHovered = hovering
+        }
+    }
+
+    /// 右侧 tok/时间区 hover:短延迟后浮出 token 分项卡片。
+    /// 用自定义浮层而非 .help():① 不受系统 tooltip ~1s 固有延迟;② 只在该区域触发。
+    private func handleInfoHover(_ hovering: Bool) {
+        infoHoverTask?.cancel()
+        if hovering {
+            infoHoverTask = Task {
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                guard !Task.isCancelled else { return }
+                withAnimation(.easeOut(duration: 0.12)) { showTokenInfo = true }
+            }
+        } else {
+            withAnimation(.easeOut(duration: 0.1)) { showTokenInfo = false }
         }
     }
 
