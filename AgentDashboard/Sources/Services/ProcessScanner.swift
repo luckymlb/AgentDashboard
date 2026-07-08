@@ -15,6 +15,7 @@ class ProcessScanner: ObservableObject {
         .appendingPathComponent(".claude/jobs")
     private let transcriptReader = TranscriptTailReader()
     private let tokenStatsReader = TokenStatsReader()
+    private let codexReader = CodexTranscriptReader()
 
     private let hookServer = HookServer()
     private let hookListener = HookListener()
@@ -30,6 +31,10 @@ class ProcessScanner: ObservableObject {
     // terminal app cache: pid -> host terminal. Stable for a pid's lifetime,
     // so no TTL — entries are dropped when the pid disappears from the scan.
     private var terminalAppCache: [Int: TerminalApp] = [:]
+
+    // codex session rollout path cache: pid -> sessionPath. 进程存活期间 session 文件不变,
+    // 所以无 TTL;pid 消失时在下轮扫描清理(同 terminalAppCache)。
+    private var codexSessionCache: [Int: String] = [:]
 
     func markAsRead(sessionId: String?) {
         guard let sid = sessionId else { return }
@@ -99,8 +104,10 @@ class ProcessScanner: ObservableObject {
         let cachedCwd = cwdCache
         let cacheTTL = cwdCacheTTL
         let cachedTerminalApp = terminalAppCache
+        let cachedCodexSession = codexSessionCache
         let reader = transcriptReader
         let tokenStats = tokenStatsReader
+        let codexRdr = codexReader
         let sessDir = sessionsDir
         let jDir = jobsDir
         let hookStatusSnapshot = hookListener.snapshot()
@@ -115,7 +122,8 @@ class ProcessScanner: ObservableObject {
                 transcriptReader: reader, sessionsDir: sessDir, jobsDir: jDir,
                 hookStatuses: hookStatusSnapshot, turnStarts: turnStarts,
                 lastHookEvents: lastEvents, unreadSessionIds: unreadIds,
-                tokenStatsReader: tokenStats
+                tokenStatsReader: tokenStats,
+                codexReader: codexRdr, codexSessionCache: cachedCodexSession
             )
             await MainActor.run { [weak self] in
                 guard let self = self else { return }
@@ -128,6 +136,7 @@ class ProcessScanner: ObservableObject {
                 self.agents = results.agents
                 self.cwdCache = results.updatedCwdCache
                 self.terminalAppCache = results.updatedTerminalAppCache
+                self.codexSessionCache = results.updatedCodexSessionCache
                 self.tokenStatsReader.prune(keeping: results.usedTranscriptPaths)
                 self.isScanning = false
             }
@@ -144,6 +153,7 @@ class ProcessScanner: ObservableObject {
         let agents: [AgentInfo]
         let updatedCwdCache: [Int: (path: String, time: Date)]
         let updatedTerminalAppCache: [Int: TerminalApp]
+        let updatedCodexSessionCache: [Int: String]
         let usedTranscriptPaths: Set<String>
     }
 
@@ -158,7 +168,9 @@ class ProcessScanner: ObservableObject {
         turnStarts: [String: Date],
         lastHookEvents: [String: Date],
         unreadSessionIds: Set<String>,
-        tokenStatsReader: TokenStatsReader
+        tokenStatsReader: TokenStatsReader,
+        codexReader: CodexTranscriptReader,
+        codexSessionCache: [Int: String]
     ) -> ScanResult {
         let terminalProcesses = getTerminalProcesses(
             cwdCache: cwdCache, cacheTTL: cacheTTL, terminalAppCache: terminalAppCache
@@ -168,6 +180,7 @@ class ProcessScanner: ObservableObject {
         var agents: [AgentInfo] = []
         var usedTranscriptPaths: Set<String> = []
         var newCwdCache = cwdCache
+        var newCodexSessionCache = codexSessionCache
 
         for proc in terminalProcesses.processes {
             newCwdCache[proc.pid] = (proc.cwd, Date())
@@ -183,10 +196,29 @@ class ProcessScanner: ObservableObject {
 
             if kind != nil && kind != "interactive" { continue }
 
+            // codex:解析 session rollout 文件,拿到 状态 / token / 轮起始时间。
+            // 路径走 pid 缓存(进程存活期间不变);缓存未命中则按 cwd 在「今天」目录查找。
+            var codexState: CodexTranscriptReader.CodexState?
+            var codexSessionPath: String?
+            if proc.type == .codex {
+                if let cached = newCodexSessionCache[proc.pid],
+                   FileManager.default.fileExists(atPath: cached) {
+                    codexSessionPath = cached
+                } else {
+                    codexSessionPath = codexReader.findSessionPath(cwd: sessionCwd)
+                    if let codexSessionPath { newCodexSessionCache[proc.pid] = codexSessionPath }
+                }
+                if let p = codexSessionPath {
+                    codexState = codexReader.readState(transcriptPath: p)
+                }
+            }
+
             let status: AgentStatus
 
             if let sid = sessionId, let hookStatus = hookStatuses[sid] {
                 status = hookStatus
+            } else if let codexStatus = codexState?.status {
+                status = codexStatus
             } else if sessionStatus == "busy", let sid = sessionId {
                 status = inferDetailedStatus(sessionId: sid, cwd: sessionCwd, transcriptReader: transcriptReader)
             } else if sessionStatus == "idle" {
@@ -205,7 +237,7 @@ class ProcessScanner: ObservableObject {
             }
 
             let elapsedTime: String
-            if status.isActive, let sid = sessionId, let turnStart = turnStarts[sid] {
+            if status.isActive, let turnStart = (sessionId.flatMap { turnStarts[$0] }) ?? codexState?.turnStart {
                 let seconds = Int(Date().timeIntervalSince(turnStart))
                 elapsedTime = formatSeconds(max(0, seconds))
             } else if status.isActive {
@@ -221,6 +253,12 @@ class ProcessScanner: ObservableObject {
                let transcriptPath = transcriptReader.findTranscriptPath(sessionId: sid, cwd: sessionCwd),
                let attrs = try? FileManager.default.attributesOfItem(atPath: transcriptPath),
                let mtime = attrs[.modificationDate] as? Date {
+                lastActive = mtime.timeIntervalSince1970 * 1000
+            } else if let codexPath = codexSessionPath,
+               let attrs = try? FileManager.default.attributesOfItem(atPath: codexPath),
+               let mtime = attrs[.modificationDate] as? Date {
+                // codex:用 session rollout 文件 mtime 作为最近活动时间(同 claude transcript mtime)。
+                // 同时驱动 idle 时的 "Xs ago" 显示与按最近活动排序。
                 lastActive = mtime.timeIntervalSince1970 * 1000
             } else {
                 let sessionFile = sessionsDir.appendingPathComponent("\(proc.pid).json")
@@ -247,6 +285,8 @@ class ProcessScanner: ObservableObject {
                let transcriptPath = transcriptReader.findTranscriptPath(sessionId: sid, cwd: sessionCwd) {
                 tokenUsage = tokenStatsReader.accumulate(transcriptPath: transcriptPath)
                 usedTranscriptPaths.insert(transcriptPath)
+            } else if proc.type == .codex {
+                tokenUsage = codexState?.tokenUsage
             } else {
                 tokenUsage = nil
             }
@@ -276,6 +316,8 @@ class ProcessScanner: ObservableObject {
         }
 
         let newTerminalAppCache = terminalProcesses.terminalAppCache.filter { livePids.contains($0.key) }
+        // codex session 缓存同 terminalAppCache:pid 消失即清理。
+        let prunedCodexSessionCache = newCodexSessionCache.filter { livePids.contains($0.key) }
 
         return ScanResult(
             agents: agents.sorted {
@@ -292,6 +334,7 @@ class ProcessScanner: ObservableObject {
             },
             updatedCwdCache: newCwdCache,
             updatedTerminalAppCache: newTerminalAppCache,
+            updatedCodexSessionCache: prunedCodexSessionCache,
             usedTranscriptPaths: usedTranscriptPaths
         )
     }
@@ -548,7 +591,11 @@ class ProcessScanner: ObservableObject {
         let parts = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
         guard parts.count >= 6 else { return false }
         let command = parts[5...].joined(separator: " ")
-        return command.hasPrefix("node") && command.contains("/codex")
+        // 新版 Codex CLI 直接以 `codex` 运行;旧版为 `node /path/codex`。两种格式都需识别。
+        let isCodex = command == "codex"
+            || command.hasPrefix("codex ")
+            || (command.hasPrefix("node") && command.contains("/codex"))
+        return isCodex
             && !command.contains("app-server") && !command.contains("node_repl")
             && !command.contains("ccb-agent-sidebar")
             && !command.contains("dangerously-bypass-hook-trust")
