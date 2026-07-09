@@ -21,7 +21,6 @@ final class CodexTranscriptReader: @unchecked Sendable {
         let turnStart: Date?
     }
 
-    private let tailBytes: Int = 65536
     private let queue = DispatchQueue(label: "com.lucky.AgentDashboard.codexCache")
     /// cwd → sessionPath(进程 cwd 稳定,可长期复用;文件消失则失效)
     private var pathCache: [String: String] = [:]
@@ -104,15 +103,34 @@ final class CodexTranscriptReader: @unchecked Sendable {
          .replacingOccurrences(of: "\\/", with: "/")
     }
 
-    /// 读 session 尾部,推断 状态 + token + 轮起始时间。读不到任何事件返回 nil(让调用方回退 CPU 兜底)。
+    /// 读 session,推断 状态 + token + 轮起始时间。
+    /// 渐进扩大读取窗口:多数 turn 在 64KB 内一次搞定;单 turn 超大(连续工具/大输出)时
+    /// 逐步扩大到含本轮 task_started —— 之前只读固定 64KB,长 turn 的 task_started 被挤出
+    /// 会导致状态判错/turnStart 丢失。
     func readState(transcriptPath: String) -> CodexState? {
         guard let fileHandle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: transcriptPath)) else { return nil }
         defer { fileHandle.closeFile() }
-
         let fileSize = fileHandle.seekToEndOfFile()
         guard fileSize > 0 else { return nil }
 
-        let readSize = min(UInt64(tailBytes), fileSize)
+        let steps: [UInt64] = [65_536, 262_144, 1_048_576, 4_194_304]
+        var state: CodexState?
+        for size in steps {
+            let readSize = min(size, fileSize)
+            let r = Self.parseTail(fileHandle: fileHandle, fileSize: fileSize, readSize: readSize)
+            state = r.state
+            if r.complete || readSize >= fileSize { break }
+        }
+        if state == nil {
+            state = Self.parseTail(fileHandle: fileHandle, fileSize: fileSize, readSize: fileSize).state
+        }
+        logger.debug("READSTATE status=\(state?.status.label ?? "nil", privacy: .public) token=\(state?.tokenUsage?.total.description ?? "-", privacy: .public) turnStart=\(state?.turnStart != nil, privacy: .public)")
+        return state
+    }
+
+    /// 读尾部 readSize 字节解析。complete = 状态完整(idle,或 active 且拿到本轮 task_started);
+    /// false = 范围不够(缺 event_msg 或 task_started),调用方应扩大窗口重试。
+    private static func parseTail(fileHandle: FileHandle, fileSize: UInt64, readSize: UInt64) -> (state: CodexState?, complete: Bool) {
         let offset = fileSize - readSize
         fileHandle.seek(toFileOffset: offset)
         let tailData = fileHandle.readDataToEndOfFile()
@@ -124,8 +142,7 @@ final class CodexTranscriptReader: @unchecked Sendable {
         } else {
             validData = tailData
         }
-
-        guard let tailString = String(data: validData, encoding: .utf8) else { return nil }
+        guard let tailString = String(data: validData, encoding: .utf8) else { return (nil, false) }
         let lines = tailString.components(separatedBy: "\n").filter { !$0.isEmpty }
 
         var lastEventMsgType: String?
@@ -134,8 +151,6 @@ final class CodexTranscriptReader: @unchecked Sendable {
         var completedAfterLastStarted = false
         var lastTokenUsage: TokenUsage?
         /// 最后一个工具调用是否需要用户授权(require_escalated)且尚未产出结果。
-        /// codex 需要弹 yes/no 时,function_call 的 arguments 会含 "sandbox_permissions":"require_escalated",
-        /// 且授权前不会出现对应的 function_call_output。
         var lastCallNeedsApproval = false
         var hasOutputAfterLastCall = false
 
@@ -146,7 +161,6 @@ final class CodexTranscriptReader: @unchecked Sendable {
             let payload = json["payload"] as? [String: Any]
             let ts = (json["timestamp"] as? String).flatMap { Self.isoFormatter.date(from: $0) }
 
-            // 工具调用:追踪最后一个调用是否待授权且无结果。
             if type == "response_item", let pt = payload?["type"] as? String {
                 if pt == "function_call" || pt == "custom_tool_call" {
                     let args = (payload?["arguments"] as? String) ?? ""
@@ -178,10 +192,8 @@ final class CodexTranscriptReader: @unchecked Sendable {
             }
         }
 
-        guard let lastType = lastEventMsgType else { return nil }
+        guard let lastType = lastEventMsgType else { return (nil, false) }
 
-        // 状态:① 最后一个调用待授权且无结果 → confirming(等用户 yes/no);
-        //      ② 否则以最后一个 event_msg 决定。
         let status: AgentStatus
         let isConfirming = lastCallNeedsApproval && !hasOutputAfterLastCall
         if isConfirming {
@@ -199,11 +211,11 @@ final class CodexTranscriptReader: @unchecked Sendable {
         if status == .idle || completedAfterLastStarted {
             turnStart = nil
         } else {
-            turnStart = lastTaskStartedTime   // 可能为 nil → 不显示时间,但状态仍正确
+            turnStart = lastTaskStartedTime
         }
 
-        logger.debug("READSTATE status=\(status.label, privacy: .public) token=\(lastTokenUsage?.total.description ?? "-", privacy: .public) turnStart=\(turnStart != nil, privacy: .public)")
-        return CodexState(status: status, tokenUsage: lastTokenUsage, turnStart: turnStart)
+        let complete = (status == .idle) || (turnStart != nil)
+        return (CodexState(status: status, tokenUsage: lastTokenUsage, turnStart: turnStart), complete)
     }
 
     /// codex total_token_usage → TokenUsage。

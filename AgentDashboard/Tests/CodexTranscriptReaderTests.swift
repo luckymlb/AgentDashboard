@@ -48,9 +48,10 @@ final class CodexTranscriptReaderTests: XCTestCase {
         XCTAssertNotNil(s?.turnStart)
     }
 
-    /// 长 turn(尾部 64KB 无 event_msg)→ readState 返回 nil。已知边界,测试守护防止静默改变。
-    func testReadStateLongTurnReturnsNil() {
+    /// 长 turn(task_started 被挤出 64KB)→ readState 渐进扩大窗口找回 task_started → running。
+    func testReadStateLongTurn() {
         let s = CodexTranscriptReader().readState(transcriptPath: fixture("longturn"))
-        XCTAssertNil(s)
+        XCTAssertEqual(s?.status, .running)
+        XCTAssertNotNil(s?.turnStart)
     }
 }
