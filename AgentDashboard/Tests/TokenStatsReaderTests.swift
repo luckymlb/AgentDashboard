@@ -4,9 +4,9 @@ import XCTest
 final class TokenStatsReaderTests: XCTestCase {
 
     private func transcript() -> String {
-        let path = Bundle.module.path(forResource: "transcript", withExtension: "jsonl", subdirectory: "Fixtures/claude")
-        XCTAssertNotNil(path, "missing claude transcript fixture")
-        return path!
+        let url = Bundle.module.url(forResource: "transcript", withExtension: "jsonl", subdirectory: "Fixtures/claude")
+        XCTAssertNotNil(url, "missing claude transcript fixture")
+        return url!.path
     }
 
     /// assistant 行的 message.usage 累加(user 行跳过)。

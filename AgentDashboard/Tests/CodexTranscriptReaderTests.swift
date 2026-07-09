@@ -23,9 +23,9 @@ final class CodexTranscriptReaderTests: XCTestCase {
     }
 
     private func fixture(_ name: String) -> String {
-        let path = Bundle.module.path(forResource: name, withExtension: "jsonl", subdirectory: "Fixtures/codex")
-        XCTAssertNotNil(path, "missing fixture: \(name)")
-        return path!
+        let url = Bundle.module.url(forResource: name, withExtension: "jsonl", subdirectory: "Fixtures/codex")
+        XCTAssertNotNil(url, "missing fixture: \(name)")
+        return url!.path
     }
 
     func testReadStateConfirming() {
