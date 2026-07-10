@@ -82,10 +82,6 @@ class ProcessScanner: ObservableObject {
                 self.scan()
             }
         }
-        // PreToolUse 超时降级判定 confirming 时,立即 scan 刷新 UI(不等周期)。
-        hookListener.onPendingTimeout = { [weak self] _ in
-            self?.scan()
-        }
         hookServer.start()
 
         scan()
