@@ -11,9 +11,8 @@ private let logger = Logger(subsystem: "com.lucky.AgentDashboard", category: "Co
 /// - 每个 turn 由 `task_started` / `task_complete` 成对包裹
 /// - `token_count` 事件含累计 `total_token_usage`(取最后一条即可)
 ///
-/// 镜像 TranscriptTailReader / TokenStatsReader 的风格:
-/// @unchecked Sendable + serial DispatchQueue 缓存 + tail 读取 + os.Logger。
-final class CodexTranscriptReader: @unchecked Sendable {
+/// 无实例可变状态,可安全跨 actor 使用;状态解析采用 tail 读取。
+final class CodexTranscriptReader: Sendable {
     struct CodexState {
         let status: AgentStatus
         let tokenUsage: TokenUsage?
@@ -21,9 +20,16 @@ final class CodexTranscriptReader: @unchecked Sendable {
         let turnStart: Date?
     }
 
-    private let queue = DispatchQueue(label: "com.lucky.AgentDashboard.codexCache")
-    /// cwd → sessionPath(进程 cwd 稳定,可长期复用;文件消失则失效)
-    private var pathCache: [String: String] = [:]
+    struct SessionCandidate {
+        let path: String
+        let startedAt: Date
+        let mtime: Date
+    }
+
+    struct SessionMetadata {
+        let cwd: String
+        let startedAt: Date?
+    }
 
     /// codex timestamp 为 ISO8601 UTC(如 "2026-07-08T03:30:05.287Z")。
     private static let isoFormatter: ISO8601DateFormatter = {
@@ -32,68 +38,92 @@ final class CodexTranscriptReader: @unchecked Sendable {
         return f
     }()
 
-    /// 按 cwd 匹配 session 文件,取 mtime 最新的。扫最近 7 天目录
-    /// (~/.codex/sessions/YYYY/MM/DD/),覆盖跨天存活的 codex 进程——
-    /// 其 session 文件在启动那天目录,只扫「今天」会漏。
-    func findSessionPath(cwd: String) -> String? {
-        let cached: String? = queue.sync { pathCache[cwd] }
-        if let cached = cached, FileManager.default.fileExists(atPath: cached) {
-            return cached
-        }
-
+    /// 按 cwd + 进程启动时间匹配 rollout。同 cwd 多实例通过 excluding 保证一对一分配。
+    /// 扫最近 7 天并额外包含进程启动日,支持长期存活的 Codex。
+    func findSessionPath(cwd: String, processStartedAt: Date, excluding: Set<String>) -> String? {
         let cal = Calendar.current
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        var best: (path: String, mtime: Date)?
+        var candidates: [SessionCandidate] = []
         var totalRollouts = 0
-        var matched = 0
+        var directories: Set<String> = []
 
-        for daysAgo in 0..<7 {
-            guard let day = cal.date(byAdding: .day, value: -daysAgo, to: Date()) else { continue }
+        let recentDays = (0..<7).compactMap { cal.date(byAdding: .day, value: -$0, to: Date()) }
+        for day in recentDays + [processStartedAt] {
             let comps = cal.dateComponents([.year, .month, .day], from: day)
             guard let y = comps.year, let m = comps.month, let d = comps.day else { continue }
             let dir = String(format: "%@/.codex/sessions/%04d/%02d/%02d", home, y, m, d)
+            guard directories.insert(dir).inserted else { continue }
             guard let entries = try? FileManager.default.contentsOfDirectory(atPath: dir) else { continue }
             let rollouts = entries.filter { $0.hasPrefix("rollout-") && $0.hasSuffix(".jsonl") }
             totalRollouts += rollouts.count
 
             for name in rollouts {
                 let path = "\(dir)/\(name)"
-                guard let cwdInFile = readSessionCwd(path: path), cwdInFile == cwd else { continue }
-                matched += 1
-                let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date)
-                    ?? Date.distantPast
-                if best == nil || mtime > best!.mtime {
-                    best = (path, mtime)
-                }
+                guard let metadata = readSessionMetadata(path: path), metadata.cwd == cwd else { continue }
+                let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+                let mtime = (attrs?[.modificationDate] as? Date) ?? Date.distantPast
+                let startedAt = metadata.startedAt
+                    ?? (attrs?[.creationDate] as? Date)
+                    ?? mtime
+                candidates.append(SessionCandidate(path: path, startedAt: startedAt, mtime: mtime))
             }
         }
-        logger.debug("FINDSESSION cwd=\(cwd, privacy: .public) days=7 rollouts=\(totalRollouts) matched=\(matched) -> \(best?.path ?? "nil", privacy: .public)")
 
-        if let best = best {
-            queue.sync { pathCache[cwd] = best.path }
-            return best.path
-        }
-        queue.sync { pathCache.removeValue(forKey: cwd) }
-        return nil
+        let selected = Self.selectSessionPath(
+            candidates: candidates, processStartedAt: processStartedAt, excluding: excluding
+        )
+        logger.debug("FINDSESSION cwd=\(cwd, privacy: .public) rollouts=\(totalRollouts) matched=\(candidates.count) -> \(selected ?? "nil", privacy: .public)")
+        return selected
     }
 
-    /// 读 session 文件首行 session_meta 的 cwd。
+    /// 选择启动时间最接近进程的 rollout。超过 10 分钟视为旧会话,等待新文件出现。
+    static func selectSessionPath(
+        candidates: [SessionCandidate], processStartedAt: Date, excluding: Set<String>
+    ) -> String? {
+        let available = candidates.filter { !excluding.contains($0.path) }
+        guard let best = available.min(by: {
+            let lhsDelta = abs($0.startedAt.timeIntervalSince(processStartedAt))
+            let rhsDelta = abs($1.startedAt.timeIntervalSince(processStartedAt))
+            if lhsDelta != rhsDelta { return lhsDelta < rhsDelta }
+            return $0.mtime > $1.mtime
+        }) else { return nil }
+        guard abs(best.startedAt.timeIntervalSince(processStartedAt)) <= 10 * 60 else { return nil }
+        return best.path
+    }
+
+    /// 读 session 文件首行 session_meta 的 cwd 与启动时间。
     /// session_meta 行含巨大的 base_instructions(整行可达数十 KB),不能整行 JSON 解析;
-    /// 而 cwd 字段在 payload 开头(前几百字节内),所以只读 4KB 用正则提取即可。
+    /// 目标字段在 payload 开头,所以只读 4KB 用正则提取。String(decoding:) 容忍
+    /// 4KB 边界截断 UTF-8 字符,避免中文内容导致整段解码失败。
     private static let cwdRegex: NSRegularExpression = {
         // 匹配 "cwd":"<value>",value 支持转义字符。
         try! NSRegularExpression(pattern: #"\"cwd\"\s*:\s*\"((?:\\.|[^\"\\])*)\""#)
     }()
 
-    private func readSessionCwd(path: String) -> String? {
+    private static let timestampRegex = try! NSRegularExpression(
+        pattern: #"\"timestamp\"\s*:\s*\"([^\"]+)\""#
+    )
+
+    private func readSessionMetadata(path: String) -> SessionMetadata? {
         guard let fileHandle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else { return nil }
         defer { fileHandle.closeFile() }
         let head = fileHandle.readData(ofLength: 4096)
-        guard let str = String(data: head, encoding: .utf8) else { return nil }
+        return Self.sessionMetadata(from: head)
+    }
+
+    static func sessionMetadata(from head: Data) -> SessionMetadata? {
+        let str = String(decoding: head, as: UTF8.self)
         let range = NSRange(str.startIndex..., in: str)
         guard let m = Self.cwdRegex.firstMatch(in: str, range: range),
               let r = Range(m.range(at: 1), in: str) else { return nil }
-        return Self.unescapeJSONString(String(str[r]))
+        let cwd = Self.unescapeJSONString(String(str[r]))
+
+        var startedAt: Date?
+        if let match = Self.timestampRegex.firstMatch(in: str, range: range),
+           let tsRange = Range(match.range(at: 1), in: str) {
+            startedAt = Self.isoFormatter.date(from: String(str[tsRange]))
+        }
+        return SessionMetadata(cwd: cwd, startedAt: startedAt)
     }
 
     /// 简易 JSON 字符串反转义(macOS 路径常见 \" \\ \/,其余Unicode原样保留)。

@@ -223,6 +223,7 @@ class ProcessScanner: ObservableObject {
         var usedTranscriptPaths: Set<String> = []
         var newCwdCache = cwdCache
         var newCodexSessionCache = codexSessionCache
+        var assignedCodexSessionPaths: Set<String> = []
 
         for proc in terminalProcesses.processes {
             newCwdCache[proc.pid] = (proc.cwd, Date())
@@ -246,13 +247,20 @@ class ProcessScanner: ObservableObject {
             var codexSessionPath: String?
             if proc.type == .codex {
                 if let cached = newCodexSessionCache[proc.pid],
-                   FileManager.default.fileExists(atPath: cached) {
+                   FileManager.default.fileExists(atPath: cached),
+                   !assignedCodexSessionPaths.contains(cached) {
                     codexSessionPath = cached
                 } else {
-                    codexSessionPath = codexReader.findSessionPath(cwd: sessionCwd)
+                    newCodexSessionCache.removeValue(forKey: proc.pid)
+                    codexSessionPath = codexReader.findSessionPath(
+                        cwd: sessionCwd,
+                        processStartedAt: proc.startedAt,
+                        excluding: assignedCodexSessionPaths
+                    )
                     if let codexSessionPath { newCodexSessionCache[proc.pid] = codexSessionPath }
                 }
                 if let p = codexSessionPath {
+                    assignedCodexSessionPaths.insert(p)
                     codexState = codexReader.readState(transcriptPath: p)
                 }
             }
@@ -664,6 +672,9 @@ class ProcessScanner: ObservableObject {
         process.standardError = FileHandle.nullDevice
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
         process.arguments = ["-a", "-p", "\(pid)", "-d", "cwd", "-Fn"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["LC_ALL"] = "en_US.UTF-8"
+        process.environment = environment
 
         do {
             try process.run()

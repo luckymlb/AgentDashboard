@@ -22,6 +22,50 @@ final class CodexTranscriptReaderTests: XCTestCase {
         XCTAssertEqual(CodexTranscriptReader.unescapeJSONString(#"a\/b\\c\"d"#), #"a/b\c"d"#)
     }
 
+    func testSessionMetadataHandlesChineseCwdAndTruncatedUTF8Tail() {
+        var data = Data(#"{"timestamp":"2026-07-11T11:06:21.000Z","payload":{"cwd":"/tmp/宣传"},"tail":""#.utf8)
+        data.append(0xE4) // first byte of a truncated three-byte UTF-8 character
+
+        let metadata = CodexTranscriptReader.sessionMetadata(from: data)
+        XCTAssertEqual(metadata?.cwd, "/tmp/宣传")
+        XCTAssertNotNil(metadata?.startedAt)
+    }
+
+    func testSelectSessionPathUsesProcessStartAndExcludesAssignedPath() {
+        let processStart = Date(timeIntervalSince1970: 1_000)
+        let candidates = [
+            CodexTranscriptReader.SessionCandidate(
+                path: "/old", startedAt: Date(timeIntervalSince1970: 900), mtime: processStart
+            ),
+            CodexTranscriptReader.SessionCandidate(
+                path: "/current", startedAt: Date(timeIntervalSince1970: 995), mtime: processStart
+            ),
+        ]
+
+        XCTAssertEqual(
+            CodexTranscriptReader.selectSessionPath(
+                candidates: candidates, processStartedAt: processStart, excluding: []
+            ),
+            "/current"
+        )
+        XCTAssertEqual(
+            CodexTranscriptReader.selectSessionPath(
+                candidates: candidates, processStartedAt: processStart, excluding: ["/current"]
+            ),
+            "/old"
+        )
+    }
+
+    func testSelectSessionPathRejectsStaleSession() {
+        let processStart = Date(timeIntervalSince1970: 10_000)
+        let candidates = [CodexTranscriptReader.SessionCandidate(
+            path: "/stale", startedAt: Date(timeIntervalSince1970: 1_000), mtime: processStart
+        )]
+        XCTAssertNil(CodexTranscriptReader.selectSessionPath(
+            candidates: candidates, processStartedAt: processStart, excluding: []
+        ))
+    }
+
     private func fixture(_ name: String) -> String {
         let url = Bundle.module.url(forResource: name, withExtension: "jsonl", subdirectory: "Fixtures/codex")
         XCTAssertNotNil(url, "missing fixture: \(name)")
