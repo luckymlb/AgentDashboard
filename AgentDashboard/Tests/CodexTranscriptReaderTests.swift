@@ -34,6 +34,13 @@ final class CodexTranscriptReaderTests: XCTestCase {
         XCTAssertNotNil(s?.turnStart)
     }
 
+    /// Current Codex custom_tool_call stores tool JSON in payload.input, not arguments.
+    func testReadStateConfirmingFromCustomToolInput() {
+        let s = CodexTranscriptReader().readState(transcriptPath: fixture("confirming_custom"))
+        XCTAssertEqual(s?.status, .confirming)
+        XCTAssertNotNil(s?.turnStart)
+    }
+
     func testReadStateIdleWithToken() {
         let s = CodexTranscriptReader().readState(transcriptPath: fixture("idle"))
         XCTAssertEqual(s?.status, .idle)

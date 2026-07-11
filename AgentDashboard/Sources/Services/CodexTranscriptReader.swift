@@ -163,7 +163,11 @@ final class CodexTranscriptReader: @unchecked Sendable {
 
             if type == "response_item", let pt = payload?["type"] as? String {
                 if pt == "function_call" || pt == "custom_tool_call" {
-                    let args = (payload?["arguments"] as? String) ?? ""
+                    // Legacy function_call stores JSON in `arguments`; current
+                    // custom_tool_call stores the same tool input in `input`.
+                    let args = (payload?["arguments"] as? String)
+                        ?? (payload?["input"] as? String)
+                        ?? ""
                     lastCallNeedsApproval = args.contains("require_escalated")
                     hasOutputAfterLastCall = false
                 } else if pt == "function_call_output" || pt == "custom_tool_call_output" {
