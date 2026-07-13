@@ -77,6 +77,12 @@ Codex 无需额外配置。Claude Code 建议配置 Hooks，以获得更及时�
         "hooks": [{"type": "command", "command": "curl -s -X POST -H 'Content-Type: application/json' -d @- 'http://127.0.0.1:8765/hook?type=PreToolUse' --max-time 1 2>/dev/null || true"}]
       }
     ],
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [{"type": "command", "command": "curl -s -X POST -H 'Content-Type: application/json' -d @- 'http://127.0.0.1:8765/hook?type=PermissionRequest' --max-time 1 2>/dev/null || true"}]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "*",
@@ -103,7 +109,7 @@ Codex 无需额外配置。Claude Code 建议配置 Hooks，以获得更及时�
     ],
     "Notification": [
       {
-        "matcher": "*",
+        "matcher": "permission_prompt",
         "hooks": [{"type": "command", "command": "curl -s -X POST -H 'Content-Type: application/json' -d @- 'http://127.0.0.1:8765/hook?type=Notification' --max-time 1 2>/dev/null || true"}]
       }
     ]

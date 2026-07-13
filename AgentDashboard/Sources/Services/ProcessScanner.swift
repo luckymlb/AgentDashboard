@@ -20,11 +20,12 @@ class ProcessScanner: ObservableObject {
     private let hookServer = HookServer()
     private let hookListener = HookListener()
     private let notificationManager = NotificationManager()
-    /// 上一轮 scan 的 explicit confirming session 集,用于检测 claude Notification 触发的进入。
+    /// 上一轮 scan 的 explicit confirming session 集，用于检测 Claude 权限请求的进入。
     private var lastExplicitConfirming: Set<String> = []
 
     private var scanTimer: Timer?
     private var isScanning = false
+    private var needsRescan = false
     private var pollingInterval: TimeInterval = 10.0
 
     // cwd cache: pid -> (cwd, timestamp)
@@ -107,8 +108,12 @@ class ProcessScanner: ObservableObject {
     }
 
     func scan() {
-        guard !isScanning else { return }
+        guard !isScanning else {
+            needsRescan = true
+            return
+        }
         isScanning = true
+        needsRescan = false
 
         let cachedCwd = cwdCache
         let cacheTTL = cwdCacheTTL
@@ -144,7 +149,7 @@ class ProcessScanner: ObservableObject {
                 self.unreadSessionIds.formUnion(justBecameIdle)
 
                 // 通知 diff:第一性——只认"真·等授权"信号:
-                //   codex require_escalated、claude Notification hook(explicitConfirming)。
+                //   codex require_escalated、claude PermissionRequest/permission_prompt。
                 //   claude 的 PreToolUse 超时降级是推测,不通知(只用于菜单栏图标快速提示)。
                 let oldById = Dictionary(self.agents.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
                 let newIds = Set(results.agents.map { $0.id })
@@ -169,7 +174,7 @@ class ProcessScanner: ObservableObject {
                         self.notificationManager.notify(agent: newAgent, kind: .completed)
                     }
                 }
-                // claude 真 confirming(Notification hook):sessionId 新进 explicit 集 → notify。
+                // claude 真 confirming:sessionId 新进 explicit 集 → notify。
                 // 用集 diff 而非 status diff,覆盖"先超时降级、后 Notification 到"的情况。
                 let enteredExplicit = explicitConfirming.subtracting(self.lastExplicitConfirming)
                 self.lastExplicitConfirming = explicitConfirming
@@ -186,6 +191,9 @@ class ProcessScanner: ObservableObject {
                 self.codexSessionCache = results.updatedCodexSessionCache
                 self.tokenStatsReader.prune(keeping: results.usedTranscriptPaths)
                 self.isScanning = false
+                if self.needsRescan {
+                    self.scan()
+                }
             }
         }
     }

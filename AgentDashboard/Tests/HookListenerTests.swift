@@ -6,8 +6,20 @@ import XCTest
 @MainActor
 final class HookListenerTests: XCTestCase {
 
-    private func event(_ type: HookType, _ sid: String = "s1", tool: String? = nil, msg: String? = nil) -> HookEvent {
-        HookEvent(hookType: type, sessionId: sid, toolName: tool, message: msg)
+    private func event(
+        _ type: HookType,
+        _ sid: String = "s1",
+        tool: String? = nil,
+        msg: String? = nil,
+        notificationType: String? = nil
+    ) -> HookEvent {
+        HookEvent(
+            hookType: type,
+            sessionId: sid,
+            toolName: tool,
+            message: msg,
+            notificationType: notificationType
+        )
     }
 
     func testPreToolUseMapsToolToStatus() {
@@ -24,6 +36,36 @@ final class HookListenerTests: XCTestCase {
         h.handleEvent(event(.notification, msg: "need approval"))
         XCTAssertEqual(h.snapshot()["s1"], .confirming)
         XCTAssertTrue(h.explicitConfirmingSnapshot().contains("s1"))
+    }
+
+    func testPermissionRequestIsExplicitConfirmingWithoutPreToolUse() {
+        let h = HookListener()
+        h.handleEvent(event(.permissionRequest, tool: "Bash"))
+        XCTAssertEqual(h.snapshot()["s1"], .confirming)
+        XCTAssertTrue(h.explicitConfirmingSnapshot().contains("s1"))
+    }
+
+    func testPostToolUseFailureClearsPermissionRequest() {
+        let h = HookListener()
+        h.handleEvent(event(.permissionRequest, tool: "Bash"))
+        h.handleEvent(event(.postToolUseFailure, tool: "Bash"))
+        XCTAssertNil(h.snapshot()["s1"])
+        XCTAssertFalse(h.explicitConfirmingSnapshot().contains("s1"))
+    }
+
+    func testPermissionPromptNotificationIsExplicitConfirmingWithoutPreToolUse() {
+        let h = HookListener()
+        h.handleEvent(event(.notification, notificationType: "permission_prompt"))
+        XCTAssertEqual(h.snapshot()["s1"], .confirming)
+        XCTAssertTrue(h.explicitConfirmingSnapshot().contains("s1"))
+    }
+
+    func testIdleNotificationDoesNotConfirmPendingTool() {
+        let h = HookListener()
+        h.handleEvent(event(.preToolUse, tool: "Bash"))
+        h.handleEvent(event(.notification, notificationType: "idle_prompt"))
+        XCTAssertEqual(h.snapshot()["s1"], .running)
+        XCTAssertFalse(h.explicitConfirmingSnapshot().contains("s1"))
     }
 
     func testNotificationWithoutPendingToolIsIgnored() {
@@ -47,6 +89,14 @@ final class HookListenerTests: XCTestCase {
         h.handleEvent(event(.preToolUse, tool: "Bash"))
         h.handleEvent(event(.notification, msg: nil))
         h.handleEvent(event(.stop))
+        XCTAssertFalse(h.explicitConfirmingSnapshot().contains("s1"))
+    }
+
+    func testNextToolUseClearsDeniedPermissionRequest() {
+        let h = HookListener()
+        h.handleEvent(event(.permissionRequest, tool: "Bash"))
+        h.handleEvent(event(.preToolUse, tool: "Read"))
+        XCTAssertEqual(h.snapshot()["s1"], .reading)
         XCTAssertFalse(h.explicitConfirmingSnapshot().contains("s1"))
     }
 }

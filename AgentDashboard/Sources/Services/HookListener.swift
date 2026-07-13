@@ -13,10 +13,10 @@ class HookListener {
     private var statusMap: [String: StatusEntry] = [:]
     private var turnStartMap: [String: Date] = [:]
     private var lastEventMap: [String: Date] = [:]
-    /// session → PreToolUse 时间(PostToolUse 清)。用于 Notification 触发时
-    /// 区分「权限确认」(有 pending 工具)与「空闲等待」(无)。
+    /// session → PreToolUse 时间(PostToolUse 清)。仅用于兼容旧版
+    /// 不含 notification_type 的 Notification payload。
     private var pendingSince: [String: Date] = [:]
-    /// 收到 Notification hook(真·等授权)的 session。confirming(UI 图标 + 通知)
+    /// 收到确定权限信号的 session。confirming(UI 图标 + 通知)
     /// 只对此集触发,避免慢工具被误判为等授权。
     private var explicitConfirming: Set<String> = []
     private let staleTTL: TimeInterval = 30
@@ -37,19 +37,28 @@ class HookListener {
 
         switch event.hookType {
         case .preToolUse:
+            // 新工具调用证明上一个权限对话框已经结束。
+            explicitConfirming.remove(event.sessionId)
             pendingSince[event.sessionId] = event.timestamp
+        case .permissionRequest:
+            statusMap[event.sessionId] = StatusEntry(status: .confirming, timestamp: event.timestamp)
+            explicitConfirming.insert(event.sessionId)
+            logger.debug("PermissionRequest → confirming: session=\(event.sessionId) tool=\(event.toolName ?? "-")")
+            return
         case .postToolUse, .postToolUseFailure:
             pendingSince.removeValue(forKey: event.sessionId)
+            explicitConfirming.remove(event.sessionId)
             // 工具执行完成 → 若此前在等确认,清除 confirming(让 transcript 重新接管状态)。
             if statusMap[event.sessionId]?.status == .confirming {
                 statusMap.removeValue(forKey: event.sessionId)
-                explicitConfirming.remove(event.sessionId)
                 return
             }
         case .notification:
-            // Notification 是 Claude Code 的"需用户注意"信号。结合 pending 工具判定:
-            // 有 pending 工具 → 权限确认(真·等授权,记 explicit);无 → 空闲等待(忽略)。
-            if pendingSince[event.sessionId] != nil {
+            // 新版 payload 直接标注 permission_prompt。旧版缺失该字段时，
+            // 才回退到 PreToolUse 尚未完成的推断。
+            let isPermissionPrompt = event.notificationType == "permission_prompt"
+                || (event.notificationType == nil && pendingSince[event.sessionId] != nil)
+            if isPermissionPrompt {
                 statusMap[event.sessionId] = StatusEntry(status: .confirming, timestamp: event.timestamp)
                 explicitConfirming.insert(event.sessionId)
                 logger.debug("Notification → confirming: session=\(event.sessionId)")
@@ -129,6 +138,9 @@ class HookListener {
         case .preToolUse:
             guard let tool = event.toolName else { return .busy }
             return mapToolToStatus(tool)
+
+        case .permissionRequest:
+            return .confirming
 
         case .postToolUse, .postToolUseFailure:
             return nil

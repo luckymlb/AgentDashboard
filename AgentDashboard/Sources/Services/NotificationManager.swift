@@ -43,7 +43,8 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
 
         switch kind {
         case .needsConfirmation:
-            // 第一性:调用方已保证只对"真·等授权"(codex require_escalated / claude Notification)
+            // 调用方已保证只对真实授权信号（Codex require_escalated /
+            // Claude PermissionRequest 或 permission_prompt）
             // 触发;这里只防持续 confirming 重复发。即时通知,不延迟。
             guard confirmingNotified[id] == nil else { return }
             let identifier = "confirm-\(id)"
