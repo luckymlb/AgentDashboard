@@ -40,6 +40,7 @@ final class TranscriptTailReader: @unchecked Sendable {
         }
 
         let lines = tailString.components(separatedBy: "\n").filter { !$0.isEmpty }
+        var resolvedToolUseIds: Set<String> = []
 
         for i in stride(from: lines.count - 1, through: max(0, lines.count - 20), by: -1) {
             guard let data = lines[i].data(using: .utf8),
@@ -47,19 +48,30 @@ final class TranscriptTailReader: @unchecked Sendable {
                   let type = json["type"] as? String else { continue }
 
             switch type {
+            case "user":
+                // Claude stores tool results inside a user message. Remember their ids while
+                // walking backwards so an answered AskUserQuestion cannot be mistaken for a
+                // still-pending question.
+                resolvedToolUseIds.formUnion(toolResultIds(from: json))
             case "assistant":
-                return inferFromAssistantMessage(json)
+                return inferFromAssistantMessage(json, resolvedToolUseIds: resolvedToolUseIds)
             case "tool_result":
-                return .processing
+                if let toolUseId = json["tool_use_id"] as? String, !toolUseId.isEmpty {
+                    resolvedToolUseIds.insert(toolUseId)
+                } else {
+                    return .processing
+                }
             default:
                 continue
             }
         }
 
-        return nil
+        return resolvedToolUseIds.isEmpty ? nil : .processing
     }
 
-    private func inferFromAssistantMessage(_ json: [String: Any]) -> AgentStatus {
+    private func inferFromAssistantMessage(
+        _ json: [String: Any], resolvedToolUseIds: Set<String>
+    ) -> AgentStatus {
         guard let message = json["message"] as? [String: Any],
               let content = message["content"] as? [[String: Any]],
               !content.isEmpty else {
@@ -78,10 +90,27 @@ final class TranscriptTailReader: @unchecked Sendable {
             let hasToolUse = content.contains { ($0["type"] as? String) == "tool_use" }
             return hasToolUse ? .busy : .crafting
         case "tool_use":
+            if let toolUseId = lastBlock["id"] as? String,
+               resolvedToolUseIds.contains(toolUseId) {
+                return .processing
+            }
             return inferFromToolUse(lastBlock)
         default:
             return .busy
         }
+    }
+
+    private func toolResultIds(from json: [String: Any]) -> Set<String> {
+        guard let message = json["message"] as? [String: Any],
+              let content = message["content"] as? [[String: Any]] else {
+            return []
+        }
+        return Set(content.compactMap { block in
+            guard (block["type"] as? String) == "tool_result",
+                  let toolUseId = block["tool_use_id"] as? String,
+                  !toolUseId.isEmpty else { return nil }
+            return toolUseId
+        })
     }
 
     private func inferFromToolUse(_ block: [String: Any]) -> AgentStatus {

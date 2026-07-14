@@ -43,7 +43,10 @@ class HookServer {
             return
         }
         listener = newListener
-        newListener.newConnectionLimit = 32
+        // This is a decrementing delivery budget, not a concurrent-connection cap.
+        // Each Claude hook opens a short-lived TCP connection, so a finite value would
+        // permanently stop delivery after that many events even after connections close.
+        newListener.newConnectionLimit = NWListener.InfiniteConnectionLimit
 
         newListener.newConnectionHandler = { [weak self] connection in
             self?.handleConnection(connection)

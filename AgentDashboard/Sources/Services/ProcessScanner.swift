@@ -26,6 +26,7 @@ class ProcessScanner: ObservableObject {
     private var scanTimer: Timer?
     private var isScanning = false
     private var needsRescan = false
+    private var scanRevisionGate = ScanRevisionGate()
     private var pollingInterval: TimeInterval = 10.0
 
     // cwd cache: pid -> (cwd, timestamp)
@@ -108,12 +109,22 @@ class ProcessScanner: ObservableObject {
     }
 
     func scan() {
+        scanRevisionGate.registerRequest()
         guard !isScanning else {
             needsRescan = true
             return
         }
+        launchScan()
+    }
+
+    /// Starts one scan for the latest requested revision. New scan requests may arrive while
+    /// detached work is running; their revision invalidates this result before any UI,
+    /// unread, notification, or cache side effect is applied.
+    private func launchScan() {
+        guard !isScanning else { return }
         isScanning = true
         needsRescan = false
+        let scanRevision = scanRevisionGate.current
 
         let cachedCwd = cwdCache
         let cacheTTL = cwdCacheTTL
@@ -142,6 +153,14 @@ class ProcessScanner: ObservableObject {
             )
             await MainActor.run { [weak self] in
                 guard let self = self else { return }
+
+                guard self.scanRevisionGate.accepts(scanRevision) else {
+                    logger.debug("Discard stale scan revision=\(scanRevision) latest=\(self.scanRevisionGate.current)")
+                    self.isScanning = false
+                    self.needsRescan = false
+                    self.launchScan()
+                    return
+                }
 
                 let previousActiveIds = Set(self.agents.filter { $0.status.isActive }.compactMap(\.sessionId))
                 let newIdleIds = Set(results.agents.filter { !$0.status.isActive }.compactMap(\.sessionId))
@@ -199,7 +218,8 @@ class ProcessScanner: ObservableObject {
                 self.tokenStatsReader.prune(keeping: results.usedTranscriptPaths)
                 self.isScanning = false
                 if self.needsRescan {
-                    self.scan()
+                    self.needsRescan = false
+                    self.launchScan()
                 }
             }
         }
