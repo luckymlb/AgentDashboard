@@ -58,11 +58,54 @@ final class ProcessScannerPureTests: XCTestCase {
         XCTAssertTrue(ProcessScanner.shouldNotifyCompletion(oldAgent: old, newAgent: completed))
     }
 
+    func testCodexCompletedTurnBecomesUnread() {
+        let old = agent(status: .running, sessionId: "codex-session")
+        let completed = agent(
+            status: .idle, turnOutcome: .completed, sessionId: "codex-session"
+        )
+
+        XCTAssertTrue(ProcessScanner.shouldMarkUnreadCompletion(
+            oldAgent: old, newAgent: completed
+        ))
+    }
+
+    func testCodexAbortedTurnDoesNotBecomeUnread() {
+        let old = agent(status: .running, sessionId: "codex-session")
+        let aborted = agent(
+            status: .idle, turnOutcome: .aborted, sessionId: "codex-session"
+        )
+
+        XCTAssertFalse(ProcessScanner.shouldMarkUnreadCompletion(
+            oldAgent: old, newAgent: aborted
+        ))
+    }
+
+    func testClaudeCompletedTurnStillBecomesUnread() {
+        let old = agent(type: .claude, status: .running, sessionId: "claude-session")
+        let completed = agent(type: .claude, status: .idle, sessionId: "claude-session")
+
+        XCTAssertTrue(ProcessScanner.shouldMarkUnreadCompletion(
+            oldAgent: old, newAgent: completed
+        ))
+    }
+
+    func testDifferentSessionDoesNotInheritUnread() {
+        let old = agent(status: .running, sessionId: "old-session")
+        let completed = agent(
+            status: .idle, turnOutcome: .completed, sessionId: "new-session"
+        )
+
+        XCTAssertFalse(ProcessScanner.shouldMarkUnreadCompletion(
+            oldAgent: old, newAgent: completed
+        ))
+    }
+
     private func agent(
         type: AgentType = .codex,
         status: AgentStatus,
         elapsedTime: String = "",
-        turnOutcome: AgentTurnOutcome? = nil
+        turnOutcome: AgentTurnOutcome? = nil,
+        sessionId: String? = nil
     ) -> AgentInfo {
         AgentInfo(
             pid: 1,
@@ -73,7 +116,7 @@ final class ProcessScannerPureTests: XCTestCase {
             elapsedTime: elapsedTime,
             status: status,
             sessionName: nil,
-            sessionId: nil,
+            sessionId: sessionId,
             turnOutcome: turnOutcome
         )
     }

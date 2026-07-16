@@ -46,11 +46,13 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
 
         switch kind {
         case .needsConfirmation:
-            // 调用方已保证只对真实授权信号（Codex require_escalated /
-            // Claude PermissionRequest、permission_prompt 或 AskUserQuestion）
-            // 触发;这里只防持续 confirming 重复发。即时通知,不延迟。
+            // 调用方已保证只对真实等待用户的信号（Codex 的审批策略+规则判定，
+            // Claude PermissionRequest、permission_prompt 或 AskUserQuestion）触发；
+            // 这里只防持续 confirming 重复发。即时通知,不延迟。
             guard confirmingNotified[id] == nil else { return }
-            let identifier = "confirm-\(id)"
+            // 同一个固定 identifier 会被 macOS 当作旧通知更新，后续确认不再展示
+            // banner。每个 confirming episode 使用唯一 id，持续期间仍由内存映射去重。
+            let identifier = Self.confirmationIdentifier(agentId: id)
             confirmingNotified[id] = identifier
             track(identifier: identifier, agentId: id)
             deliver(
@@ -173,5 +175,9 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
 
     private func body(for agent: AgentInfo) -> String {
         agent.projectName
+    }
+
+    nonisolated static func confirmationIdentifier(agentId: String) -> String {
+        "confirm-\(agentId)-\(UUID().uuidString)"
     }
 }

@@ -3,6 +3,15 @@ import XCTest
 @testable import AgentDashboard
 
 final class NotificationTargetResolverTests: XCTestCase {
+    func testConfirmationIdentifiersAreUniquePerEpisode() {
+        let first = NotificationManager.confirmationIdentifier(agentId: "123-ttys001")
+        let second = NotificationManager.confirmationIdentifier(agentId: "123-ttys001")
+
+        XCTAssertNotEqual(first, second)
+        XCTAssertTrue(first.hasPrefix("confirm-123-ttys001-"))
+        XCTAssertTrue(second.hasPrefix("confirm-123-ttys001-"))
+    }
+
     private let start = Date(timeIntervalSince1970: 1_000)
 
     func testPayloadRoundTripPreservesStableIdentity() {
