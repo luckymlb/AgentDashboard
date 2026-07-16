@@ -140,6 +140,16 @@ struct AgentInfo: Identifiable {
         self.tokenUsage = tokenUsage
     }
 
+    func withHasUnread(_ hasUnread: Bool) -> AgentInfo {
+        AgentInfo(
+            pid: pid, processStartedAt: processStartedAt, type: type, tty: tty,
+            workingDirectory: workingDirectory, elapsedTime: elapsedTime, status: status,
+            sessionName: sessionName, sessionId: sessionId, lastActiveAt: lastActiveAt,
+            hasUnread: hasUnread, terminalApp: terminalApp, turnOutcome: turnOutcome,
+            tokenUsage: tokenUsage
+        )
+    }
+
     static func parseElapsedTime(_ str: String) -> Int {
         var total = 0
         let scanner = str.lowercased()

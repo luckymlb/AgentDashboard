@@ -50,16 +50,7 @@ class ProcessScanner: ObservableObject {
         guard let sid = sessionId else { return }
         unreadSessionIds.remove(sid)
         if let idx = agents.firstIndex(where: { $0.sessionId == sid && $0.hasUnread }) {
-            let old = agents[idx]
-            agents[idx] = AgentInfo(
-                pid: old.pid, processStartedAt: old.processStartedAt,
-                type: old.type, tty: old.tty,
-                workingDirectory: old.workingDirectory, elapsedTime: old.elapsedTime,
-                status: old.status, sessionName: old.sessionName,
-                sessionId: old.sessionId, lastActiveAt: old.lastActiveAt, hasUnread: false,
-                terminalApp: old.terminalApp, turnOutcome: old.turnOutcome,
-                tokenUsage: old.tokenUsage
-            )
+            agents[idx] = agents[idx].withHasUnread(false)
         }
     }
 
@@ -141,7 +132,6 @@ class ProcessScanner: ObservableObject {
         let explicitConfirming = hookListener.explicitConfirmingSnapshot()
         let turnStarts = hookListener.turnStartSnapshot()
         let lastEvents = hookListener.lastEventSnapshot()
-        let unreadIds = unreadSessionIds
 
         Task.detached { [weak self] in
             let results = ProcessScanner.performScan(
@@ -149,7 +139,7 @@ class ProcessScanner: ObservableObject {
                 terminalAppCache: cachedTerminalApp,
                 transcriptReader: reader, sessionsDir: sessDir, jobsDir: jDir,
                 hookStatuses: hookStatusSnapshot, turnStarts: turnStarts,
-                lastHookEvents: lastEvents, unreadSessionIds: unreadIds,
+                lastHookEvents: lastEvents,
                 tokenStatsReader: tokenStats,
                 codexReader: codexRdr, codexSessionCache: cachedCodexSession
             )
@@ -164,26 +154,47 @@ class ProcessScanner: ObservableObject {
                     return
                 }
 
-                let previousActiveIds = Set(self.agents.filter { $0.status.isActive }.compactMap(\.sessionId))
-                let newIdleIds = Set(results.agents.filter { !$0.status.isActive }.compactMap(\.sessionId))
-                let justBecameIdle = previousActiveIds.intersection(newIdleIds)
-                self.unreadSessionIds.formUnion(justBecameIdle)
+                let oldBySessionId = Dictionary(
+                    self.agents.compactMap { agent in
+                        agent.sessionId.map { ($0, agent) }
+                    },
+                    uniquingKeysWith: { current, _ in current }
+                )
+                let justCompleted = Set(results.agents.compactMap { newAgent -> String? in
+                    guard let sid = newAgent.sessionId,
+                          let oldAgent = oldBySessionId[sid],
+                          Self.shouldMarkUnreadCompletion(
+                            oldAgent: oldAgent, newAgent: newAgent
+                          ) else { return nil }
+                    return sid
+                })
+                self.unreadSessionIds.formUnion(justCompleted)
+
+                // 未读是主线程上的交互状态，不能采用扫描开始时的旧快照；否则用户在
+                // 扫描期间点击已读，旧结果完成后会把蓝点重新覆盖回来。
+                let newAgents = Self.sortAgents(results.agents.map { agent in
+                    agent.withHasUnread(
+                        agent.sessionId.map(self.unreadSessionIds.contains) ?? false
+                    )
+                })
 
                 // 通知 diff:第一性——只认"真·等授权"信号:
-                //   codex require_escalated/用户交互工具、claude PermissionRequest/permission_prompt/AskUserQuestion。
+                //   codex 经审批策略+execpolicy 证明会等待用户的命令/交互工具，
+                //   claude PermissionRequest/permission_prompt/AskUserQuestion。
                 //   claude 的 PreToolUse 超时降级是推测,不通知(只用于菜单栏图标快速提示)。
                 let oldById = Dictionary(self.agents.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-                let newIds = Set(results.agents.map { $0.id })
+                let newIds = Set(newAgents.map { $0.id })
 
                 // 进程退出:清理通知状态与已发横幅
                 for oldAgent in self.agents where !newIds.contains(oldAgent.id) {
                     self.notificationManager.purge(agentId: oldAgent.id)
                 }
-                for newAgent in results.agents {
+                for newAgent in newAgents {
                     guard let oldAgent = oldById[newAgent.id] else { continue }   // 新 agent,不通知
                     let old = oldAgent.status
                     let nw = newAgent.status
-                    // codex confirming 进入 = 权限批准或用户交互工具。claude 走 explicit 集(下面)。
+                    // codex confirming 进入 = 真实等待用户审批或用户交互工具。
+                    // claude 走 explicit 集(下面)。
                     if old != .confirming && nw == .confirming && newAgent.type == .codex {
                         self.notificationManager.notify(agent: newAgent, kind: .needsConfirmation)
                     }
@@ -202,18 +213,18 @@ class ProcessScanner: ObservableObject {
                 let previousClaudeConfirming = Set(self.agents.compactMap { agent in
                     agent.type == .claude && agent.status == .confirming ? agent.sessionId : nil
                 })
-                let currentClaudeConfirming = Set(results.agents.compactMap { agent in
+                let currentClaudeConfirming = Set(newAgents.compactMap { agent in
                     agent.type == .claude && agent.status == .confirming ? agent.sessionId : nil
                 })
                 let enteredClaudeConfirming = currentClaudeConfirming.subtracting(previousClaudeConfirming)
                 for sid in enteredExplicit.union(enteredClaudeConfirming) {
-                    if let agent = results.agents.first(where: { $0.sessionId == sid && $0.type == .claude && $0.status == .confirming }) {
+                    if let agent = newAgents.first(where: { $0.sessionId == sid && $0.type == .claude && $0.status == .confirming }) {
                         self.notificationManager.notify(agent: agent, kind: .needsConfirmation)
                     }
                 }
 
-                self.agents = results.agents
-                logger.debug("SCAN agents=\(results.agents.count) :: \(results.agents.map { "\($0.type.rawValue)#\($0.pid)[\($0.status.label)]" }.joined(separator: " "), privacy: .public)")
+                self.agents = newAgents
+                logger.debug("SCAN agents=\(newAgents.count) :: \(newAgents.map { "\($0.type.rawValue)#\($0.pid)[\($0.status.label)]" }.joined(separator: " "), privacy: .public)")
                 self.cwdCache = results.updatedCwdCache
                 self.terminalAppCache = results.updatedTerminalAppCache
                 self.codexSessionCache = results.updatedCodexSessionCache
@@ -251,7 +262,6 @@ class ProcessScanner: ObservableObject {
         hookStatuses: [String: AgentStatus],
         turnStarts: [String: Date],
         lastHookEvents: [String: Date],
-        unreadSessionIds: Set<String>,
         tokenStatsReader: TokenStatsReader,
         codexReader: CodexTranscriptReader,
         codexSessionCache: [Int: String]
@@ -275,7 +285,7 @@ class ProcessScanner: ObservableObject {
             let sessionData = proc.type == .codex ? nil : allSessions[proc.pid]
 
             let sessionStatus = sessionData?["status"] as? String
-            let sessionId = sessionData?["sessionId"] as? String
+            var sessionId = sessionData?["sessionId"] as? String
             let sessionCwd = sessionData?["cwd"] as? String ?? proc.cwd
             let sessionName = sessionData?["name"] as? String
             let kind = sessionData?["kind"] as? String
@@ -304,6 +314,7 @@ class ProcessScanner: ObservableObject {
                 if let p = codexSessionPath {
                     assignedCodexSessionPaths.insert(p)
                     codexState = codexReader.readState(transcriptPath: p)
+                    sessionId = codexState?.sessionId
                 }
             }
 
@@ -404,7 +415,7 @@ class ProcessScanner: ObservableObject {
                 sessionName: sessionName,
                 sessionId: sessionId,
                 lastActiveAt: lastActive,
-                hasUnread: unreadSessionIds.contains(sessionId ?? ""),
+                hasUnread: false,
                 terminalApp: proc.terminalApp,
                 turnOutcome: codexState?.turnOutcome,
                 tokenUsage: tokenUsage
@@ -424,23 +435,27 @@ class ProcessScanner: ObservableObject {
         let prunedCodexSessionCache = newCodexSessionCache.filter { livePids.contains($0.key) }
 
         return ScanResult(
-            agents: agents.sorted {
-                if $0.status.sortPriority != $1.status.sortPriority {
-                    return $0.status.sortPriority < $1.status.sortPriority
-                }
-                if !$0.status.isActive {
-                    if $0.hasUnread != $1.hasUnread {
-                        return $0.hasUnread
-                    }
-                    return $0.lastActiveAt > $1.lastActiveAt
-                }
-                return $0.elapsedSeconds < $1.elapsedSeconds
-            },
+            agents: sortAgents(agents),
             updatedCwdCache: newCwdCache,
             updatedTerminalAppCache: newTerminalAppCache,
             updatedCodexSessionCache: prunedCodexSessionCache,
             usedTranscriptPaths: usedTranscriptPaths
         )
+    }
+
+    private nonisolated static func sortAgents(_ agents: [AgentInfo]) -> [AgentInfo] {
+        agents.sorted {
+            if $0.status.sortPriority != $1.status.sortPriority {
+                return $0.status.sortPriority < $1.status.sortPriority
+            }
+            if !$0.status.isActive {
+                if $0.hasUnread != $1.hasUnread {
+                    return $0.hasUnread
+                }
+                return $0.lastActiveAt > $1.lastActiveAt
+            }
+            return $0.elapsedSeconds < $1.elapsedSeconds
+        }
     }
 
     // MARK: - Latest child job activity
@@ -579,6 +594,25 @@ class ProcessScanner: ObservableObject {
             && !newAgent.status.isActive
             && oldAgent.elapsedSeconds > 30
             && newAgent.turnOutcome != .aborted
+    }
+
+    /// 蓝点表示“这一会话有一轮正常完成且用户尚未查看”。Claude 没有 turnOutcome，
+    /// 继续使用 Active → Idle；Codex 必须看到 task_complete，排除 Ctrl+C 的 aborted。
+    nonisolated static func shouldMarkUnreadCompletion(
+        oldAgent: AgentInfo, newAgent: AgentInfo
+    ) -> Bool {
+        guard let oldSessionId = oldAgent.sessionId,
+              oldSessionId == newAgent.sessionId,
+              oldAgent.type == newAgent.type,
+              oldAgent.status.isActive,
+              !newAgent.status.isActive else { return false }
+
+        switch newAgent.type {
+        case .claude:
+            return true
+        case .codex:
+            return newAgent.turnOutcome == .completed
+        }
     }
 
     nonisolated static func cpuFallbackStatus(cpu: Double, stat: String) -> AgentStatus {
