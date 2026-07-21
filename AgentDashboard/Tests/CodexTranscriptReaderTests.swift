@@ -71,6 +71,19 @@ final class CodexTranscriptReaderTests: XCTestCase {
         XCTAssertNotNil(metadata?.startedAt)
     }
 
+    func testSessionMetadataPrefersPayloadTimestampOverDelayedWriteTimestamp() {
+        let data = Data(#"{"timestamp":"2026-07-21T02:55:28.268Z","type":"session_meta","payload":{"session_id":"codex-session-2","id":"codex-session-2","timestamp":"2026-07-21T02:45:20.798Z","cwd":"/tmp/Potsdam"}}"#.utf8)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        let metadata = CodexTranscriptReader.sessionMetadata(from: data)
+
+        XCTAssertEqual(
+            metadata?.startedAt,
+            formatter.date(from: "2026-07-21T02:45:20.798Z")
+        )
+    }
+
     func testReadStateCarriesStableSessionId() throws {
         let state = try readInlineState([
             #"{"timestamp":"2026-07-16T01:00:00.000Z","type":"session_meta","payload":{"session_id":"codex-session-2","cwd":"/tmp"}}"#,

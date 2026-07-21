@@ -149,8 +149,12 @@ final class CodexTranscriptReader: @unchecked Sendable {
         pattern: #"\"session_id\"\s*:\s*\"([^\"]+)\""#
     )
 
-    private static let timestampRegex = try! NSRegularExpression(
-        pattern: #"\"timestamp\"\s*:\s*\"([^\"]+)\""#
+    private static let payloadTimestampRegex = try! NSRegularExpression(
+        pattern: #"\"payload\"\s*:\s*\{[^{}]*?\"timestamp\"\s*:\s*\"([^\"]+)\""#
+    )
+
+    private static let outerTimestampRegex = try! NSRegularExpression(
+        pattern: #"^\s*\{\s*\"timestamp\"\s*:\s*\"([^\"]+)\""#
     )
 
     private func readSessionMetadata(path: String) -> SessionMetadata? {
@@ -173,11 +177,14 @@ final class CodexTranscriptReader: @unchecked Sendable {
             sessionId = Self.unescapeJSONString(String(str[idRange]))
         }
 
-        var startedAt: Date?
-        if let match = Self.timestampRegex.firstMatch(in: str, range: range),
-           let tsRange = Range(match.range(at: 1), in: str) {
-            startedAt = Self.isoFormatter.date(from: String(str[tsRange]))
-        }
+        // 新版 Codex 的 session_meta 同时有外层写盘时间和 payload 中的真实会话
+        // 启动时间。rollout 延迟落盘时两者可能相差数分钟；匹配进程必须优先使用
+        // payload.timestamp，旧格式没有该字段时才退回外层 timestamp。
+        let timestampMatch = Self.payloadTimestampRegex.firstMatch(in: str, range: range)
+            ?? Self.outerTimestampRegex.firstMatch(in: str, range: range)
+        let startedAt = timestampMatch
+            .flatMap { Range($0.range(at: 1), in: str) }
+            .flatMap { Self.isoFormatter.date(from: String(str[$0])) }
         return SessionMetadata(sessionId: sessionId, cwd: cwd, startedAt: startedAt)
     }
 
