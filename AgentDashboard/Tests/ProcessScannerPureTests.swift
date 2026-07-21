@@ -165,12 +165,95 @@ final class ProcessScannerPureTests: XCTestCase {
         ), 1_000_000)
     }
 
+    func testApplyingCodexStateUpdatesOnlyRolloutDerivedFields() {
+        let original = AgentInfo(
+            pid: 42,
+            processStartedAt: Date(timeIntervalSince1970: 1_000),
+            type: .codex,
+            tty: "ttys009",
+            workingDirectory: "/tmp/project",
+            elapsedTime: "2s",
+            status: .thinking,
+            sessionName: "original",
+            sessionId: "session-1",
+            lastActiveAt: 100,
+            hasUnread: true,
+            terminalApp: .iTerm2,
+            tokenUsage: TokenUsage(
+                inputTokens: 1, cacheCreationTokens: 0,
+                cacheReadTokens: 2, outputTokens: 3, model: nil
+            )
+        )
+        let turnStart = Date(timeIntervalSince1970: 1_990)
+        let signature = CodexTranscriptReader.FileSignature(
+            size: 123, modificationDate: Date(timeIntervalSince1970: 1_995)
+        )
+        let state = CodexTranscriptReader.CodexState(
+            sessionId: "session-1",
+            status: .searching,
+            tokenUsage: nil,
+            turnStart: turnStart,
+            turnOutcome: nil
+        )
+
+        let refreshed = ProcessScanner.applyingCodexState(
+            state, signature: signature, to: original,
+            now: Date(timeIntervalSince1970: 2_000)
+        )
+
+        XCTAssertEqual(refreshed.pid, original.pid)
+        XCTAssertEqual(refreshed.processStartedAt, original.processStartedAt)
+        XCTAssertEqual(refreshed.tty, original.tty)
+        XCTAssertEqual(refreshed.workingDirectory, original.workingDirectory)
+        XCTAssertEqual(refreshed.terminalApp, original.terminalApp)
+        XCTAssertEqual(refreshed.status, .searching)
+        XCTAssertEqual(refreshed.elapsedTime, "10s")
+        XCTAssertEqual(refreshed.lastActiveAt, 1_995_000)
+        XCTAssertEqual(refreshed.tokenUsage, original.tokenUsage)
+    }
+
+    func testHiddenDashboardDoesNotPublishCodexTelemetryOnlyChange() {
+        let old = agent(
+            status: .running,
+            elapsedTime: "10s",
+            tokenUsage: TokenUsage(
+                inputTokens: 10, cacheCreationTokens: 0,
+                cacheReadTokens: 0, outputTokens: 1, model: nil
+            )
+        )
+        let telemetryOnly = agent(
+            status: .running,
+            elapsedTime: "11s",
+            tokenUsage: TokenUsage(
+                inputTokens: 11, cacheCreationTokens: 0,
+                cacheReadTokens: 0, outputTokens: 2, model: nil
+            )
+        )
+
+        XCTAssertFalse(ProcessScanner.shouldPublishCodexRefresh(
+            oldAgent: old, newAgent: telemetryOnly, dashboardVisible: false
+        ))
+        XCTAssertTrue(ProcessScanner.shouldPublishCodexRefresh(
+            oldAgent: old, newAgent: telemetryOnly, dashboardVisible: true
+        ))
+    }
+
+    func testHiddenDashboardStillPublishesCodexStatusChange() {
+        let old = agent(status: .running)
+        let confirming = agent(status: .confirming)
+
+        XCTAssertTrue(ProcessScanner.shouldPublishCodexRefresh(
+            oldAgent: old, newAgent: confirming, dashboardVisible: false
+        ))
+    }
+
     private func agent(
         type: AgentType = .codex,
         status: AgentStatus,
         elapsedTime: String = "",
         turnOutcome: AgentTurnOutcome? = nil,
-        sessionId: String? = nil
+        sessionId: String? = nil,
+        tokenUsage: TokenUsage? = nil
     ) -> AgentInfo {
         AgentInfo(
             pid: 1,
@@ -182,7 +265,8 @@ final class ProcessScannerPureTests: XCTestCase {
             status: status,
             sessionName: nil,
             sessionId: sessionId,
-            turnOutcome: turnOutcome
+            turnOutcome: turnOutcome,
+            tokenUsage: tokenUsage
         )
     }
 }

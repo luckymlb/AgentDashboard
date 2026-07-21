@@ -21,7 +21,7 @@ enum TerminalApp: String, Sendable {
     case unknown = "unknown"
 }
 
-enum AgentStatus {
+enum AgentStatus: Sendable {
     case confirming
     case thinking
     case crafting
@@ -94,7 +94,7 @@ extension AgentStatus: Comparable {
     }
 }
 
-struct AgentInfo: Identifiable {
+struct AgentInfo: Identifiable, Sendable {
     let id: String
     let pid: Int
     /// 进程身份的一部分。PID 会复用，通知点击时必须同时核对启动时间。

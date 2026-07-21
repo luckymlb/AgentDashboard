@@ -11,15 +11,17 @@ private let logger = Logger(subsystem: "com.lucky.AgentDashboard", category: "Co
 /// - 每个 turn 由 `task_started` / `task_complete` 成对包裹
 /// - `token_count` 事件含累计 `total_token_usage`(取最后一条即可)
 ///
-/// 无实例可变状态,可安全跨 actor 使用;状态解析采用 tail 读取。
-final class CodexTranscriptReader: Sendable {
+/// 状态解析采用 tail 读取；缓存由锁保护，可安全跨 actor 使用。
+final class CodexTranscriptReader: @unchecked Sendable {
     private let approvalResolver: CodexApprovalResolver
+    private let cacheLock = NSLock()
+    private var stateCache: [String: StateCacheEntry] = [:]
 
     init(approvalEvaluator: any CodexExecPolicyEvaluating = CodexExecPolicyEvaluator()) {
         approvalResolver = CodexApprovalResolver(evaluator: approvalEvaluator)
     }
 
-    struct CodexState {
+    struct CodexState: Sendable {
         /// rollout 首行 session_meta 中的稳定会话身份。
         let sessionId: String?
         let status: AgentStatus
@@ -28,6 +30,21 @@ final class CodexTranscriptReader: Sendable {
         let turnStart: Date?
         /// 最近一轮的结束原因；active turn 为 nil。
         let turnOutcome: AgentTurnOutcome?
+    }
+
+    struct FileSignature: Sendable, Equatable {
+        let size: UInt64
+        let modificationDate: Date
+
+        var modificationTimeMilliseconds: Double {
+            modificationDate.timeIntervalSince1970 * 1_000
+        }
+    }
+
+    private struct StateCacheEntry {
+        let signature: FileSignature
+        let state: CodexState
+        let preferredReadSize: UInt64
     }
 
     struct SessionCandidate {
@@ -47,6 +64,15 @@ final class CodexTranscriptReader: Sendable {
     /// 仍在运行的较新调用。
     private struct ActiveToolCall {
         let status: AgentStatus
+        let sequence: Int
+    }
+
+    /// 先配对 call/output，最后只对真正未完成的调用做审批判断。审批检查可能启动
+    /// `codex execpolicy`，绝不能为已经完成的历史调用反复执行。
+    private struct UnresolvedToolCall {
+        let toolName: String?
+        let input: String
+        let context: CodexApprovalContext
         let sequence: Int
     }
 
@@ -123,8 +149,12 @@ final class CodexTranscriptReader: Sendable {
         pattern: #"\"session_id\"\s*:\s*\"([^\"]+)\""#
     )
 
-    private static let timestampRegex = try! NSRegularExpression(
-        pattern: #"\"timestamp\"\s*:\s*\"([^\"]+)\""#
+    private static let payloadTimestampRegex = try! NSRegularExpression(
+        pattern: #"\"payload\"\s*:\s*\{[^{}]*?\"timestamp\"\s*:\s*\"([^\"]+)\""#
+    )
+
+    private static let outerTimestampRegex = try! NSRegularExpression(
+        pattern: #"^\s*\{\s*\"timestamp\"\s*:\s*\"([^\"]+)\""#
     )
 
     private func readSessionMetadata(path: String) -> SessionMetadata? {
@@ -147,11 +177,14 @@ final class CodexTranscriptReader: Sendable {
             sessionId = Self.unescapeJSONString(String(str[idRange]))
         }
 
-        var startedAt: Date?
-        if let match = Self.timestampRegex.firstMatch(in: str, range: range),
-           let tsRange = Range(match.range(at: 1), in: str) {
-            startedAt = Self.isoFormatter.date(from: String(str[tsRange]))
-        }
+        // 新版 Codex 的 session_meta 同时有外层写盘时间和 payload 中的真实会话
+        // 启动时间。rollout 延迟落盘时两者可能相差数分钟；匹配进程必须优先使用
+        // payload.timestamp，旧格式没有该字段时才退回外层 timestamp。
+        let timestampMatch = Self.payloadTimestampRegex.firstMatch(in: str, range: range)
+            ?? Self.outerTimestampRegex.firstMatch(in: str, range: range)
+        let startedAt = timestampMatch
+            .flatMap { Range($0.range(at: 1), in: str) }
+            .flatMap { Self.isoFormatter.date(from: String(str[$0])) }
         return SessionMetadata(sessionId: sessionId, cwd: cwd, startedAt: startedAt)
     }
 
@@ -167,6 +200,16 @@ final class CodexTranscriptReader: Sendable {
     /// 逐步扩大到含本轮 task_started —— 之前只读固定 64KB,长 turn 的 task_started 被挤出
     /// 会导致状态判错/turnStart 丢失。
     func readState(transcriptPath: String) -> CodexState? {
+        guard let signature = Self.fileSignature(atPath: transcriptPath) else { return nil }
+
+        // ProcessScanner 的完整扫描和 1 秒快速探测可能在交界处相遇。串行化同一 reader
+        // 的解析与缓存，避免两个任务同时重复解析同一大文件。
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        if let cached = stateCache[transcriptPath], cached.signature == signature {
+            return cached.state
+        }
+
         guard let fileHandle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: transcriptPath)) else { return nil }
         defer { fileHandle.closeFile() }
 
@@ -177,10 +220,15 @@ final class CodexTranscriptReader: Sendable {
         let fileSize = fileHandle.seekToEndOfFile()
         guard fileSize > 0 else { return nil }
 
-        let steps: [UInt64] = [65_536, 262_144, 1_048_576, 4_194_304]
+        let baseSteps: [UInt64] = [65_536, 262_144, 1_048_576, 4_194_304]
+        let preferredReadSize = stateCache[transcriptPath]?.preferredReadSize ?? baseSteps[0]
+        var steps = baseSteps.filter { $0 >= preferredReadSize }
+        if steps.isEmpty { steps = [baseSteps.last!] }
         var state: CodexState?
+        var usedReadSize = min(steps[0], fileSize)
         for size in steps {
             let readSize = min(size, fileSize)
+            usedReadSize = readSize
             let r = Self.parseTail(
                 fileHandle: fileHandle, fileSize: fileSize, readSize: readSize,
                 approvalResolver: approvalResolver, sessionId: sessionId
@@ -189,13 +237,37 @@ final class CodexTranscriptReader: Sendable {
             if r.complete || readSize >= fileSize { break }
         }
         if state == nil {
+            usedReadSize = fileSize
             state = Self.parseTail(
                 fileHandle: fileHandle, fileSize: fileSize, readSize: fileSize,
                 approvalResolver: approvalResolver, sessionId: sessionId
             ).state
         }
+        if let state {
+            // Idle 下一轮通常能在 64KB 内完成；活跃长 turn 记住已经证明足够的窗口，
+            // 避免每次文件增长都重复解析 64KB → 256KB → 1MB。
+            let nextReadSize = state.status == .idle
+                ? baseSteps[0]
+                : min(max(usedReadSize, baseSteps[0]), baseSteps.last!)
+            stateCache[transcriptPath] = StateCacheEntry(
+                signature: signature, state: state, preferredReadSize: nextReadSize
+            )
+        }
         logger.debug("READSTATE status=\(state?.status.label ?? "nil", privacy: .public) token=\(state?.tokenUsage?.total.description ?? "-", privacy: .public) turnStart=\(state?.turnStart != nil, privacy: .public)")
         return state
+    }
+
+    static func fileSignature(atPath path: String) -> FileSignature? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = (attrs[.size] as? NSNumber)?.uint64Value,
+              let modificationDate = attrs[.modificationDate] as? Date else { return nil }
+        return FileSignature(size: size, modificationDate: modificationDate)
+    }
+
+    func prune(keeping paths: Set<String>) {
+        cacheLock.lock()
+        stateCache = stateCache.filter { paths.contains($0.key) }
+        cacheLock.unlock()
     }
 
     /// 读尾部 readSize 字节解析。complete = 状态完整(idle,或 active 且拿到本轮 task_started);
@@ -227,13 +299,9 @@ final class CodexTranscriptReader: Sendable {
         var endedAfterLastStarted = false
         var turnOutcome: AgentTurnOutcome?
         var lastTokenUsage: TokenUsage?
-        /// 尚未收到对应 output、正在等待用户操作的工具调用。
-        /// 包括权限批准与显式问题/安装选择，不把普通工具调用视为 confirming。
-        var pendingConfirmationCallIds: Set<String> = []
-        var hasPendingConfirmationWithoutCallId = false
-        /// 普通工具必须按 call_id 独立追踪，支持并行调用和乱序完成。
-        var activeToolCalls: [String: ActiveToolCall] = [:]
-        var activeToolWithoutCallId: ActiveToolCall?
+        /// 尚未收到对应 output 的调用。先完整配对，再只判断最终未完成的调用。
+        var unresolvedToolCalls: [String: UnresolvedToolCall] = [:]
+        var unresolvedToolWithoutCallId: UnresolvedToolCall?
         var nextToolSequence = 0
         var approvalContext = CodexApprovalContext.legacyDefault
 
@@ -242,8 +310,6 @@ final class CodexTranscriptReader: Sendable {
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
             let type = json["type"] as? String
             let payload = json["payload"] as? [String: Any]
-            let ts = (json["timestamp"] as? String).flatMap { Self.isoFormatter.date(from: $0) }
-
             if type == "turn_context", let payload {
                 approvalContext = CodexApprovalContext.parse(payload)
             }
@@ -258,41 +324,23 @@ final class CodexTranscriptReader: Sendable {
                     let toolName = payload?["name"] as? String
                     let callId = payload?["call_id"] as? String
                     nextToolSequence += 1
-                    let escalationRequests = Self.escalationRequests(from: input)
-                    let confirmationDecision = approvalResolver.decision(
-                        isInteractiveTool: Self.isInteractiveTool(toolName),
-                        escalationCommands: escalationRequests.map(\.command),
-                        context: approvalContext
+                    let call = UnresolvedToolCall(
+                        toolName: toolName,
+                        input: input,
+                        context: approvalContext,
+                        sequence: nextToolSequence
                     )
-                    if confirmationDecision == .required {
-                        if let callId, !callId.isEmpty {
-                            pendingConfirmationCallIds.insert(callId)
-                        } else {
-                            hasPendingConfirmationWithoutCallId = true
-                        }
+                    if let callId, !callId.isEmpty {
+                        unresolvedToolCalls[callId] = call
                     } else {
-                        if confirmationDecision == .unknown,
-                           !escalationRequests.isEmpty {
-                            logger.warning("审批规则无法证明需要用户操作，降级为普通活动 tool=\(toolName ?? "-", privacy: .public)")
-                        }
-                        let call = ActiveToolCall(
-                            status: Self.activityStatus(toolName: toolName, input: input),
-                            sequence: nextToolSequence
-                        )
-                        if let callId, !callId.isEmpty {
-                            activeToolCalls[callId] = call
-                        } else {
-                            // 旧格式没有 call_id，只能保留最近一个并由无 id output 清除。
-                            activeToolWithoutCallId = call
-                        }
+                        // 旧格式没有 call_id，只能保留最近一个并由无 id output 清除。
+                        unresolvedToolWithoutCallId = call
                     }
                 } else if pt == "function_call_output" || pt == "custom_tool_call_output" {
                     if let callId = payload?["call_id"] as? String, !callId.isEmpty {
-                        pendingConfirmationCallIds.remove(callId)
-                        activeToolCalls.removeValue(forKey: callId)
+                        unresolvedToolCalls.removeValue(forKey: callId)
                     } else {
-                        hasPendingConfirmationWithoutCallId = false
-                        activeToolWithoutCallId = nil
+                        unresolvedToolWithoutCallId = nil
                     }
                 }
             }
@@ -312,28 +360,23 @@ final class CodexTranscriptReader: Sendable {
 
             switch pt {
             case "task_started":
-                lastTaskStartedTime = ts
+                lastTaskStartedTime = (json["timestamp"] as? String)
+                    .flatMap { Self.isoFormatter.date(from: $0) }
                 endedAfterLastStarted = false
                 turnOutcome = nil
                 approvalContext = .legacyDefault
-                pendingConfirmationCallIds.removeAll()
-                hasPendingConfirmationWithoutCallId = false
-                activeToolCalls.removeAll()
-                activeToolWithoutCallId = nil
+                unresolvedToolCalls.removeAll()
+                unresolvedToolWithoutCallId = nil
             case "task_complete":
                 if lastTaskStartedTime != nil { endedAfterLastStarted = true }
                 turnOutcome = .completed
-                pendingConfirmationCallIds.removeAll()
-                hasPendingConfirmationWithoutCallId = false
-                activeToolCalls.removeAll()
-                activeToolWithoutCallId = nil
+                unresolvedToolCalls.removeAll()
+                unresolvedToolWithoutCallId = nil
             case "turn_aborted":
                 endedAfterLastStarted = true
                 turnOutcome = .aborted
-                pendingConfirmationCallIds.removeAll()
-                hasPendingConfirmationWithoutCallId = false
-                activeToolCalls.removeAll()
-                activeToolWithoutCallId = nil
+                unresolvedToolCalls.removeAll()
+                unresolvedToolWithoutCallId = nil
             case "token_count":
                 if let info = payload?["info"] as? [String: Any],
                    let usage = info["total_token_usage"] as? [String: Any] {
@@ -346,9 +389,30 @@ final class CodexTranscriptReader: Sendable {
 
         guard let lastType = lastEventMsgType else { return (nil, false) }
 
+        var isConfirming = false
+        var activeToolCalls: [ActiveToolCall] = []
+        for call in Array(unresolvedToolCalls.values) + [unresolvedToolWithoutCallId].compactMap({ $0 }) {
+            let escalationRequests = Self.escalationRequests(from: call.input)
+            let confirmationDecision = approvalResolver.decision(
+                isInteractiveTool: Self.isInteractiveTool(call.toolName),
+                escalationCommands: escalationRequests.map(\.command),
+                context: call.context
+            )
+            if confirmationDecision == .required {
+                isConfirming = true
+            } else {
+                if confirmationDecision == .unknown, !escalationRequests.isEmpty {
+                    logger.warning("审批规则无法证明需要用户操作，降级为普通活动 tool=\(call.toolName ?? "-", privacy: .public)")
+                }
+                activeToolCalls.append(ActiveToolCall(
+                    status: Self.activityStatus(toolName: call.toolName, input: call.input),
+                    sequence: call.sequence
+                ))
+            }
+        }
+
         let status: AgentStatus
-        let isConfirming = !pendingConfirmationCallIds.isEmpty || hasPendingConfirmationWithoutCallId
-        let latestActiveTool = (Array(activeToolCalls.values) + [activeToolWithoutCallId].compactMap { $0 })
+        let latestActiveTool = activeToolCalls
             .max { $0.sequence < $1.sequence }
         if turnOutcome != nil {
             status = .idle
