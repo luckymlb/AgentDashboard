@@ -6,7 +6,7 @@ import os
 private let logger = Logger(subsystem: "com.lucky.AgentDashboard", category: "App")
 
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private let scanner = ProcessScanner()
@@ -35,6 +35,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         popover = NSPopover()
+        popover.delegate = self
         popover.contentSize = NSSize(width: 360, height: 200)
         popover.behavior = .transient
         let hostingController = NSHostingController(
@@ -83,11 +84,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         if popover.isShown {
             popover.performClose(nil)
-            scanner.setPollingMode(.background)
         } else {
-            scanner.setPollingMode(.active)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
         }
+    }
+
+    func popoverWillShow(_ notification: Notification) {
+        scanner.setPollingMode(.active)
+    }
+
+    /// `.transient` popover 点击外部区域也会自动关闭。必须在 delegate 回调中恢复
+    /// 后台轮询；只在状态栏按钮 action 中切换会让 App 永久停在 2 秒完整扫描。
+    func popoverDidClose(_ notification: Notification) {
+        scanner.setPollingMode(.background)
     }
 }

@@ -11,6 +11,29 @@ final class CodexTranscriptReaderTests: XCTestCase {
         }
     }
 
+    private final class CountingExecPolicyEvaluator: CodexExecPolicyEvaluating, @unchecked Sendable {
+        private let lock = NSLock()
+        private var storedCallCount = 0
+        let result: CodexExecPolicyDecision
+
+        init(result: CodexExecPolicyDecision = .noMatch) {
+            self.result = result
+        }
+
+        var callCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedCallCount
+        }
+
+        func decision(for shellCommand: String, cwd: String?) -> CodexExecPolicyDecision {
+            lock.lock()
+            storedCallCount += 1
+            lock.unlock()
+            return result
+        }
+    }
+
     private func makeReader(
         policyDecision: CodexExecPolicyDecision = .noMatch
     ) -> CodexTranscriptReader {
@@ -428,6 +451,50 @@ final class CodexTranscriptReaderTests: XCTestCase {
     func testMatchingOutputClearsConfirming() {
         let s = makeReader().readState(transcriptPath: fixture("confirming_custom_completed"))
         XCTAssertNotEqual(s?.status, .confirming)
+    }
+
+    func testCompletedHistoricalToolCallDoesNotRunApprovalPolicy() {
+        let evaluator = CountingExecPolicyEvaluator()
+        let reader = CodexTranscriptReader(approvalEvaluator: evaluator)
+
+        let state = reader.readState(transcriptPath: fixture("confirming_custom_completed"))
+
+        XCTAssertNotEqual(state?.status, .confirming)
+        XCTAssertEqual(evaluator.callCount, 0)
+    }
+
+    func testUnchangedRolloutReturnsCachedStateWithoutRepeatingApprovalPolicy() {
+        let evaluator = CountingExecPolicyEvaluator()
+        let reader = CodexTranscriptReader(approvalEvaluator: evaluator)
+        let path = fixture("confirming_custom")
+
+        XCTAssertEqual(reader.readState(transcriptPath: path)?.status, .confirming)
+        XCTAssertEqual(reader.readState(transcriptPath: path)?.status, .confirming)
+
+        XCTAssertEqual(evaluator.callCount, 1)
+    }
+
+    func testRolloutAppendInvalidatesCacheAndClearsConfirmation() throws {
+        let temporaryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-cache-\(UUID().uuidString).jsonl")
+        try FileManager.default.copyItem(
+            at: URL(fileURLWithPath: fixture("confirming_custom")),
+            to: temporaryURL
+        )
+        defer { try? FileManager.default.removeItem(at: temporaryURL) }
+
+        let evaluator = CountingExecPolicyEvaluator()
+        let reader = CodexTranscriptReader(approvalEvaluator: evaluator)
+        XCTAssertEqual(reader.readState(transcriptPath: temporaryURL.path)?.status, .confirming)
+
+        let output = #"{"timestamp":"2026-07-11T01:00:04.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-current-format","output":"done"}}"#
+        let handle = try FileHandle(forWritingTo: temporaryURL)
+        defer { handle.closeFile() }
+        handle.seekToEndOfFile()
+        handle.write(Data((output + "\n").utf8))
+
+        XCTAssertNotEqual(reader.readState(transcriptPath: temporaryURL.path)?.status, .confirming)
+        XCTAssertEqual(evaluator.callCount, 1)
     }
 
     func testPreviousTurnApprovalDoesNotLeakIntoNewTurn() {

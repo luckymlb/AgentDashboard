@@ -8,6 +8,7 @@ private let logger = Logger(subsystem: "com.lucky.AgentDashboard", category: "Pr
 class ProcessScanner: ObservableObject {
     @Published var agents: [AgentInfo] = []
     @Published private(set) var unreadSessionIds: Set<String> = []
+    @Published private(set) var isDashboardVisible = false
 
     private let sessionsDir = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".claude/sessions")
@@ -24,10 +25,17 @@ class ProcessScanner: ObservableObject {
     private var lastExplicitConfirming: Set<String> = []
 
     private var scanTimer: Timer?
+    private var codexRefreshTimer: Timer?
     private var isScanning = false
     private var needsRescan = false
     private var scanRevisionGate = ScanRevisionGate()
     private var pollingInterval: TimeInterval = 10.0
+    /// Codex 没有 Hook。每秒只 stat 已匹配 rollout；仅签名变化时解析该单个文件。
+    /// 完整进程扫描仍按 pollingInterval 兜底，负责发现/退出/路径重新匹配。
+    private let codexRefreshInterval: TimeInterval = 1.0
+    private var isCodexRefreshing = false
+    private var codexRefreshGeneration: UInt64 = 0
+    private var codexRolloutSignatures: [Int: CodexTranscriptReader.FileSignature] = [:]
 
     // cwd cache: pid -> (cwd, timestamp)
     private var cwdCache: [Int: (path: String, time: Date)] = [:]
@@ -60,6 +68,10 @@ class ProcessScanner: ObservableObject {
     }
 
     func setPollingMode(_ mode: PollingMode) {
+        let isVisible = mode == .active
+        if isDashboardVisible != isVisible {
+            isDashboardVisible = isVisible
+        }
         let newInterval: TimeInterval = mode == .active ? 2.0 : 10.0
         guard newInterval != pollingInterval else { return }
         pollingInterval = newInterval
@@ -82,6 +94,7 @@ class ProcessScanner: ObservableObject {
         scan()
 
         scheduleScanTimer(interval: interval)
+        scheduleCodexRefreshTimer()
     }
 
     private func scheduleScanTimer(interval: TimeInterval) {
@@ -95,9 +108,22 @@ class ProcessScanner: ObservableObject {
         }
     }
 
+    private func scheduleCodexRefreshTimer() {
+        codexRefreshTimer?.invalidate()
+        codexRefreshTimer = Timer.scheduledTimer(
+            withTimeInterval: codexRefreshInterval, repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshChangedCodexSessions()
+            }
+        }
+    }
+
     func stopScanning() {
         scanTimer?.invalidate()
         scanTimer = nil
+        codexRefreshTimer?.invalidate()
+        codexRefreshTimer = nil
         hookServer.stop()
     }
 
@@ -117,6 +143,9 @@ class ProcessScanner: ObservableObject {
         guard !isScanning else { return }
         isScanning = true
         needsRescan = false
+        // 完整扫描拥有进程集合和路径缓存的最终决定权。使已在途的快速结果失效，
+        // 防止它在完整快照之后反向覆盖新状态。
+        codexRefreshGeneration &+= 1
         let scanRevision = scanRevisionGate.current
 
         let cachedCwd = cwdCache
@@ -156,81 +185,18 @@ class ProcessScanner: ObservableObject {
                     return
                 }
 
-                let oldBySessionId = Dictionary(
-                    self.agents.compactMap { agent in
-                        agent.sessionId.map { ($0, agent) }
-                    },
-                    uniquingKeysWith: { current, _ in current }
+                let newAgents = self.applyAgentSnapshot(
+                    results.agents,
+                    explicitConfirming: explicitConfirming,
+                    purgeMissingAgents: true
                 )
-                let justCompleted = Set(results.agents.compactMap { newAgent -> String? in
-                    guard let sid = newAgent.sessionId,
-                          let oldAgent = oldBySessionId[sid],
-                          Self.shouldMarkUnreadCompletion(
-                            oldAgent: oldAgent, newAgent: newAgent
-                          ) else { return nil }
-                    return sid
-                })
-                self.unreadSessionIds.formUnion(justCompleted)
-
-                // 未读是主线程上的交互状态，不能采用扫描开始时的旧快照；否则用户在
-                // 扫描期间点击已读，旧结果完成后会把蓝点重新覆盖回来。
-                let newAgents = Self.sortAgents(results.agents.map { agent in
-                    agent.withHasUnread(
-                        agent.sessionId.map(self.unreadSessionIds.contains) ?? false
-                    )
-                })
-
-                // 通知 diff:第一性——只认"真·等授权"信号:
-                //   codex 经审批策略+execpolicy 证明会等待用户的命令/交互工具，
-                //   claude PermissionRequest/permission_prompt/AskUserQuestion。
-                //   claude 的 PreToolUse 超时降级是推测,不通知(只用于菜单栏图标快速提示)。
-                let oldById = Dictionary(self.agents.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-                let newIds = Set(newAgents.map { $0.id })
-
-                // 进程退出:清理通知状态与已发横幅
-                for oldAgent in self.agents where !newIds.contains(oldAgent.id) {
-                    self.notificationManager.purge(agentId: oldAgent.id)
-                }
-                for newAgent in newAgents {
-                    guard let oldAgent = oldById[newAgent.id] else { continue }   // 新 agent,不通知
-                    let old = oldAgent.status
-                    let nw = newAgent.status
-                    // codex confirming 进入 = 真实等待用户审批或用户交互工具。
-                    // claude 走 explicit 集(下面)。
-                    if old != .confirming && nw == .confirming && newAgent.type == .codex {
-                        self.notificationManager.notify(agent: newAgent, kind: .needsConfirmation)
-                    }
-                    // confirming 离开(不管来源):清横幅
-                    if old == .confirming && nw != .confirming {
-                        self.notificationManager.clearConfirming(agentId: newAgent.id)
-                    }
-                    if Self.shouldNotifyCompletion(oldAgent: oldAgent, newAgent: newAgent) {
-                        self.notificationManager.notify(agent: newAgent, kind: .completed)
-                    }
-                }
-                // Claude 真 confirming：Hook 明确信号或 transcript 中未完成的
-                // AskUserQuestion 都可进入。后者保证 App 在等待期间重启也能恢复通知。
-                let enteredExplicit = explicitConfirming.subtracting(self.lastExplicitConfirming)
-                self.lastExplicitConfirming = explicitConfirming
-                let previousClaudeConfirming = Set(self.agents.compactMap { agent in
-                    agent.type == .claude && agent.status == .confirming ? agent.sessionId : nil
-                })
-                let currentClaudeConfirming = Set(newAgents.compactMap { agent in
-                    agent.type == .claude && agent.status == .confirming ? agent.sessionId : nil
-                })
-                let enteredClaudeConfirming = currentClaudeConfirming.subtracting(previousClaudeConfirming)
-                for sid in enteredExplicit.union(enteredClaudeConfirming) {
-                    if let agent = newAgents.first(where: { $0.sessionId == sid && $0.type == .claude && $0.status == .confirming }) {
-                        self.notificationManager.notify(agent: agent, kind: .needsConfirmation)
-                    }
-                }
-
-                self.agents = newAgents
                 logger.debug("SCAN agents=\(newAgents.count) :: \(newAgents.map { "\($0.type.rawValue)#\($0.pid)[\($0.status.label)]" }.joined(separator: " "), privacy: .public)")
                 self.cwdCache = results.updatedCwdCache
                 self.terminalAppCache = results.updatedTerminalAppCache
                 self.codexSessionCache = results.updatedCodexSessionCache
+                self.codexRolloutSignatures = results.codexRolloutSignatures
                 self.tokenStatsReader.prune(keeping: results.usedTranscriptPaths)
+                self.codexReader.prune(keeping: results.usedCodexTranscriptPaths)
                 // 清理已退出 session 的 Hook 路径/Stop 时间缓存(sessionId 唯一,旧条目清理即安全)。
                 let liveSessionIds = Set(newAgents.compactMap { $0.sessionId })
                 self.hookListener.pruneSessionCaches(keeping: liveSessionIds)
@@ -243,18 +209,205 @@ class ProcessScanner: ObservableObject {
         }
     }
 
+    /// Codex 快速通道只观察已由完整扫描建立的一对一 pid → rollout 映射。
+    /// stat 没变化时不读文件、不枚举进程；变化时只解析对应的单个 rollout。
+    private func refreshChangedCodexSessions() {
+        guard !isScanning, !isCodexRefreshing else { return }
+
+        let targets = agents.compactMap { agent -> CodexRefreshTarget? in
+            guard agent.type == .codex,
+                  let path = codexSessionCache[agent.pid],
+                  let signature = codexRolloutSignatures[agent.pid] else { return nil }
+            return CodexRefreshTarget(
+                agentId: agent.id,
+                pid: agent.pid,
+                processStartedAt: agent.processStartedAt,
+                path: path,
+                signature: signature
+            )
+        }
+        guard !targets.isEmpty else { return }
+
+        isCodexRefreshing = true
+        let generation = codexRefreshGeneration
+        let reader = codexReader
+        Task.detached { [weak self] in
+            var updates: [CodexRefreshUpdate] = []
+            for target in targets {
+                guard let signature = CodexTranscriptReader.fileSignature(atPath: target.path),
+                      signature != target.signature,
+                      let state = reader.readState(transcriptPath: target.path) else { continue }
+                updates.append(CodexRefreshUpdate(
+                    target: target, signature: signature, state: state
+                ))
+            }
+            let completedUpdates = updates
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.isCodexRefreshing = false
+                guard generation == self.codexRefreshGeneration, !self.isScanning else {
+                    return
+                }
+                guard !completedUpdates.isEmpty else { return }
+
+                var refreshedAgents = self.agents
+                var changed = false
+                let now = Date()
+                for update in completedUpdates {
+                    guard self.codexSessionCache[update.target.pid] == update.target.path,
+                          let index = refreshedAgents.firstIndex(where: {
+                              $0.id == update.target.agentId
+                                  && $0.pid == update.target.pid
+                                  && $0.processStartedAt == update.target.processStartedAt
+                                  && $0.type == .codex
+                          }) else { continue }
+                    let refreshed = Self.applyingCodexState(
+                        update.state,
+                        signature: update.signature,
+                        to: refreshedAgents[index],
+                        now: now
+                    )
+                    self.codexRolloutSignatures[update.target.pid] = update.signature
+                    // rollout 会为 token/遥测持续追加。面板隐藏时这些变化不应每秒
+                    // 唤醒 SwiftUI；确认、完成、状态切换等语义变化仍立即发布。
+                    if Self.shouldPublishCodexRefresh(
+                        oldAgent: refreshedAgents[index],
+                        newAgent: refreshed,
+                        dashboardVisible: self.isDashboardVisible
+                    ) {
+                        refreshedAgents[index] = refreshed
+                        changed = true
+                    }
+                }
+
+                guard changed else { return }
+                let applied = self.applyAgentSnapshot(
+                    refreshedAgents,
+                    explicitConfirming: self.hookListener.explicitConfirmingSnapshot(),
+                    purgeMissingAgents: false
+                )
+                logger.debug("CODEX_REFRESH updated=\(completedUpdates.count) :: \(applied.filter { $0.type == .codex }.map { "\($0.pid)[\($0.status.label)]" }.joined(separator: " "), privacy: .public)")
+            }
+        }
+    }
+
+    /// 完整扫描和 Codex 快速通道必须共用这一条提交路径。这样未读、确认通知、
+    /// 完成通知与通知清理的语义只有一个实现，不会因优化轮询而分叉。
+    @discardableResult
+    private func applyAgentSnapshot(
+        _ rawAgents: [AgentInfo],
+        explicitConfirming: Set<String>,
+        purgeMissingAgents: Bool
+    ) -> [AgentInfo] {
+        let oldAgents = agents
+        let oldBySessionId = Dictionary(
+            oldAgents.compactMap { agent in
+                agent.sessionId.map { ($0, agent) }
+            },
+            uniquingKeysWith: { current, _ in current }
+        )
+        let justCompleted = Set(rawAgents.compactMap { newAgent -> String? in
+            guard let sid = newAgent.sessionId,
+                  let oldAgent = oldBySessionId[sid],
+                  Self.shouldMarkUnreadCompletion(
+                    oldAgent: oldAgent, newAgent: newAgent
+                  ) else { return nil }
+            return sid
+        })
+        unreadSessionIds.formUnion(justCompleted)
+
+        // 未读是主线程上的交互状态，不能采用扫描开始时的旧快照；否则用户在
+        // 扫描期间点击已读，旧结果完成后会把蓝点重新覆盖回来。
+        let newAgents = Self.sortAgents(rawAgents.map { agent in
+            agent.withHasUnread(
+                agent.sessionId.map(unreadSessionIds.contains) ?? false
+            )
+        })
+
+        // 通知 diff:第一性——只认"真·等授权"信号:
+        //   codex 经审批策略+execpolicy 证明会等待用户的命令/交互工具，
+        //   claude PermissionRequest/permission_prompt/AskUserQuestion。
+        //   claude 的 PreToolUse 超时降级是推测,不通知(只用于菜单栏图标快速提示)。
+        let oldById = Dictionary(oldAgents.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let newIds = Set(newAgents.map(\.id))
+
+        // 只有完整扫描有权宣告进程退出；快速通道只更新已有 Codex。
+        if purgeMissingAgents {
+            for oldAgent in oldAgents where !newIds.contains(oldAgent.id) {
+                notificationManager.purge(agentId: oldAgent.id)
+            }
+        }
+        for newAgent in newAgents {
+            guard let oldAgent = oldById[newAgent.id] else { continue }   // 新 agent,不通知
+            let old = oldAgent.status
+            let nw = newAgent.status
+            // codex confirming 进入 = 真实等待用户审批或用户交互工具。
+            // claude 走 explicit 集(下面)。
+            if old != .confirming && nw == .confirming && newAgent.type == .codex {
+                notificationManager.notify(agent: newAgent, kind: .needsConfirmation)
+            }
+            // confirming 离开(不管来源):清横幅
+            if old == .confirming && nw != .confirming {
+                notificationManager.clearConfirming(agentId: newAgent.id)
+            }
+            if Self.shouldNotifyCompletion(oldAgent: oldAgent, newAgent: newAgent) {
+                notificationManager.notify(agent: newAgent, kind: .completed)
+            }
+        }
+
+        // Claude 真 confirming：Hook 明确信号或 transcript 中未完成的
+        // AskUserQuestion 都可进入。后者保证 App 在等待期间重启也能恢复通知。
+        let enteredExplicit = explicitConfirming.subtracting(lastExplicitConfirming)
+        lastExplicitConfirming = explicitConfirming
+        let previousClaudeConfirming = Set(oldAgents.compactMap { agent in
+            agent.type == .claude && agent.status == .confirming ? agent.sessionId : nil
+        })
+        let currentClaudeConfirming = Set(newAgents.compactMap { agent in
+            agent.type == .claude && agent.status == .confirming ? agent.sessionId : nil
+        })
+        let enteredClaudeConfirming = currentClaudeConfirming.subtracting(previousClaudeConfirming)
+        for sid in enteredExplicit.union(enteredClaudeConfirming) {
+            if let agent = newAgents.first(where: {
+                $0.sessionId == sid && $0.type == .claude && $0.status == .confirming
+            }) {
+                notificationManager.notify(agent: agent, kind: .needsConfirmation)
+            }
+        }
+
+        agents = newAgents
+        return newAgents
+    }
+
     deinit {
         scanTimer?.invalidate()
+        codexRefreshTimer?.invalidate()
     }
 
     // MARK: - Core scan logic (nonisolated, runs off main actor)
+
+    private struct CodexRefreshTarget: Sendable {
+        let agentId: String
+        let pid: Int
+        let processStartedAt: Date
+        let path: String
+        let signature: CodexTranscriptReader.FileSignature
+    }
+
+    private struct CodexRefreshUpdate: Sendable {
+        let target: CodexRefreshTarget
+        let signature: CodexTranscriptReader.FileSignature
+        let state: CodexTranscriptReader.CodexState
+    }
 
     private struct ScanResult: Sendable {
         let agents: [AgentInfo]
         let updatedCwdCache: [Int: (path: String, time: Date)]
         let updatedTerminalAppCache: [Int: TerminalApp]
         let updatedCodexSessionCache: [Int: String]
+        let codexRolloutSignatures: [Int: CodexTranscriptReader.FileSignature]
         let usedTranscriptPaths: Set<String>
+        let usedCodexTranscriptPaths: Set<String>
     }
 
     private nonisolated static func performScan(
@@ -281,6 +434,8 @@ class ProcessScanner: ObservableObject {
         var usedTranscriptPaths: Set<String> = []
         var newCwdCache = cwdCache
         var newCodexSessionCache = codexSessionCache
+        var codexRolloutSignatures: [Int: CodexTranscriptReader.FileSignature] = [:]
+        var usedCodexTranscriptPaths: Set<String> = []
         var assignedCodexSessionPaths: Set<String> = []
 
         for proc in terminalProcesses.processes {
@@ -304,6 +459,7 @@ class ProcessScanner: ObservableObject {
             // 路径走 pid 缓存(进程存活期间不变);缓存未命中则按 cwd 在「今天」目录查找。
             var codexState: CodexTranscriptReader.CodexState?
             var codexSessionPath: String?
+            var codexSignature: CodexTranscriptReader.FileSignature?
             if proc.type == .codex {
                 if let cached = newCodexSessionCache[proc.pid],
                    FileManager.default.fileExists(atPath: cached),
@@ -320,6 +476,11 @@ class ProcessScanner: ObservableObject {
                 }
                 if let p = codexSessionPath {
                     assignedCodexSessionPaths.insert(p)
+                    usedCodexTranscriptPaths.insert(p)
+                    codexSignature = CodexTranscriptReader.fileSignature(atPath: p)
+                    if let codexSignature {
+                        codexRolloutSignatures[proc.pid] = codexSignature
+                    }
                     codexState = codexReader.readState(transcriptPath: p)
                     sessionId = codexState?.sessionId
                 }
@@ -379,11 +540,9 @@ class ProcessScanner: ObservableObject {
                     sessionFileModifiedAt: sessionFileModifiedAt
                 )
             case .codex:
-                if let codexPath = codexSessionPath,
-                   let attrs = try? FileManager.default.attributesOfItem(atPath: codexPath),
-                   let mtime = attrs[.modificationDate] as? Date {
+                if let codexSignature {
                     // Codex rollout 是其状态事实源，继续用文件 mtime 驱动 Idle "ago"。
-                    lastActive = mtime.timeIntervalSince1970 * 1000
+                    lastActive = codexSignature.modificationTimeMilliseconds
                 } else {
                     lastActive = proc.startedAt.timeIntervalSince1970 * 1000
                 }
@@ -447,8 +606,65 @@ class ProcessScanner: ObservableObject {
             updatedCwdCache: newCwdCache,
             updatedTerminalAppCache: newTerminalAppCache,
             updatedCodexSessionCache: prunedCodexSessionCache,
-            usedTranscriptPaths: usedTranscriptPaths
+            codexRolloutSignatures: codexRolloutSignatures,
+            usedTranscriptPaths: usedTranscriptPaths,
+            usedCodexTranscriptPaths: usedCodexTranscriptPaths
         )
+    }
+
+    /// 将单个 Codex rollout 的新事实合并回原 Agent 身份。快速通道不能改 pid/tty/
+    /// terminal/cwd 等进程事实；这些字段只能由完整扫描更新。
+    nonisolated static func applyingCodexState(
+        _ state: CodexTranscriptReader.CodexState,
+        signature: CodexTranscriptReader.FileSignature,
+        to agent: AgentInfo,
+        now: Date
+    ) -> AgentInfo {
+        let elapsedTime: String
+        if state.status.isActive, let turnStart = state.turnStart {
+            elapsedTime = formatSeconds(max(0, Int(now.timeIntervalSince(turnStart))))
+        } else if state.status.isActive {
+            elapsedTime = agent.elapsedTime
+        } else {
+            elapsedTime = ""
+        }
+
+        return AgentInfo(
+            pid: agent.pid,
+            processStartedAt: agent.processStartedAt,
+            type: agent.type,
+            tty: agent.tty,
+            workingDirectory: agent.workingDirectory,
+            elapsedTime: elapsedTime,
+            status: state.status,
+            sessionName: agent.sessionName,
+            sessionId: state.sessionId ?? agent.sessionId,
+            lastActiveAt: signature.modificationTimeMilliseconds,
+            hasUnread: agent.hasUnread,
+            terminalApp: agent.terminalApp,
+            turnOutcome: state.turnOutcome,
+            tokenUsage: state.tokenUsage ?? agent.tokenUsage
+        )
+    }
+
+    nonisolated static func shouldPublishCodexRefresh(
+        oldAgent: AgentInfo,
+        newAgent: AgentInfo,
+        dashboardVisible: Bool
+    ) -> Bool {
+        if oldAgent.status != newAgent.status
+            || oldAgent.turnOutcome != newAgent.turnOutcome
+            || oldAgent.sessionId != newAgent.sessionId {
+            return true
+        }
+        if !newAgent.status.isActive && oldAgent.lastActiveAt != newAgent.lastActiveAt {
+            return true
+        }
+        if dashboardVisible {
+            return oldAgent.elapsedTime != newAgent.elapsedTime
+                || oldAgent.tokenUsage != newAgent.tokenUsage
+        }
+        return false
     }
 
     private nonisolated static func sortAgents(_ agents: [AgentInfo]) -> [AgentInfo] {
