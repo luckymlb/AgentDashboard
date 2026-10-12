@@ -42,7 +42,7 @@ final class CodexTranscriptReaderTests: XCTestCase {
         )
     }
 
-    /// codex total_token_usage → TokenUsage:input 拆 cached,reasoning 折进 output。
+    /// codex total_token_usage → TokenUsage:input 拆 cached,reasoning 已包含在 output。
     func testUsageMapping() {
         let d: [String: Any] = [
             "input_tokens": 1000,
@@ -54,7 +54,7 @@ final class CodexTranscriptReaderTests: XCTestCase {
         XCTAssertEqual(u.inputTokens, 800)       // 1000 - 200
         XCTAssertEqual(u.cacheReadTokens, 200)
         XCTAssertEqual(u.cacheCreationTokens, 0)
-        XCTAssertEqual(u.outputTokens, 60)       // 50 + 10
+        XCTAssertEqual(u.outputTokens, 50)       // reasoning 是 output 的子集
     }
 
     func testUnescapeJSONString() {
@@ -521,7 +521,7 @@ final class CodexTranscriptReaderTests: XCTestCase {
         XCTAssertNil(s?.turnStart)
         XCTAssertEqual(s?.turnOutcome, .completed)
         XCTAssertEqual(s?.tokenUsage?.inputTokens, 800)
-        XCTAssertEqual(s?.tokenUsage?.outputTokens, 60)
+        XCTAssertEqual(s?.tokenUsage?.outputTokens, 50)
     }
 
     func testTurnAbortedEndsTurnAndIgnoresThreadRollback() {

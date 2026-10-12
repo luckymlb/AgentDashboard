@@ -11,6 +11,7 @@ struct NotificationTarget: Sendable, Equatable {
     let sessionId: String?
     let originalTTY: String
     let originalTerminalApp: TerminalApp
+    var codexSocketPath: String? = nil
 
     init(agent: AgentInfo) {
         agentId = agent.id
@@ -20,6 +21,7 @@ struct NotificationTarget: Sendable, Equatable {
         sessionId = agent.sessionId
         originalTTY = agent.tty
         originalTerminalApp = agent.terminalApp
+        codexSocketPath = agent.codexSocketPath
     }
 
     init?(userInfo: [AnyHashable: Any]) {
@@ -43,6 +45,7 @@ struct NotificationTarget: Sendable, Equatable {
         sessionId = userInfo["sessionId"] as? String
         originalTTY = tty
         originalTerminalApp = terminalApp
+        codexSocketPath = userInfo["codexSocketPath"] as? String
     }
 
     var userInfo: [AnyHashable: Any] {
@@ -55,6 +58,7 @@ struct NotificationTarget: Sendable, Equatable {
             "tty": originalTTY,
             "terminalApp": originalTerminalApp.rawValue,
         ]
+        if let codexSocketPath { result["codexSocketPath"] = codexSocketPath }
         if let sessionId { result["sessionId"] = sessionId }
         return result
     }

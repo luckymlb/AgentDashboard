@@ -34,6 +34,7 @@ enum AgentStatus: Sendable {
     case busy
     case waiting
     case idle
+    case unknown
 
     var label: String {
         switch self {
@@ -49,11 +50,12 @@ enum AgentStatus: Sendable {
         case .busy:       return "Busy"
         case .waiting:    return "Waiting"
         case .idle:       return "Idle"
+        case .unknown:    return "Unknown"
         }
     }
 
     var isActive: Bool {
-        self != .idle && self != .waiting
+        self != .idle && self != .waiting && self != .unknown
     }
 
     var sortPriority: Int {
@@ -70,6 +72,7 @@ enum AgentStatus: Sendable {
         case .busy:       return 8
         case .waiting:    return 9
         case .idle:       return 10
+        case .unknown:    return 11
         }
     }
 
@@ -83,7 +86,7 @@ enum AgentStatus: Sendable {
         case .editing, .writing: return .orange
         case .searching:         return .yellow
         case .processing:        return .mint
-        case .waiting, .idle:    return .gray
+        case .waiting, .idle, .unknown: return .gray
         }
     }
 }
@@ -112,16 +115,23 @@ struct AgentInfo: Identifiable, Sendable {
     let hasUnread: Bool
     let terminalApp: TerminalApp
     let turnOutcome: AgentTurnOutcome?
-    /// Claude 会话累计 token 用量;Codex 或无 sessionId 时为 nil。
+    /// 会话累计 Token；没有可用统计时为 nil。
     let tokenUsage: TokenUsage?
+    /// 有值时是可按 thread ID 验证的 Codex 服务会话。TTY 为空时跳转桌面聊天。
+    let codexSocketPath: String?
+    let codexRolloutPath: String?
 
     init(pid: Int, processStartedAt: Date, type: AgentType, tty: String, workingDirectory: String,
          elapsedTime: String, status: AgentStatus,
          sessionName: String?, sessionId: String?, lastActiveAt: Double = 0,
          hasUnread: Bool = false, terminalApp: TerminalApp = .unknown,
          turnOutcome: AgentTurnOutcome? = nil,
-         tokenUsage: TokenUsage? = nil) {
-        self.id = "\(pid)-\(tty)"
+         tokenUsage: TokenUsage? = nil, codexSocketPath: String? = nil, codexRolloutPath: String? = nil) {
+        if type == .codex, let sessionId {
+            self.id = "codex-\(sessionId)"
+        } else {
+            self.id = "\(pid)-\(tty)"
+        }
         self.pid = pid
         self.processStartedAt = processStartedAt
         self.type = type
@@ -138,6 +148,8 @@ struct AgentInfo: Identifiable, Sendable {
         self.terminalApp = terminalApp
         self.turnOutcome = turnOutcome
         self.tokenUsage = tokenUsage
+        self.codexSocketPath = codexSocketPath
+        self.codexRolloutPath = codexRolloutPath
     }
 
     func withHasUnread(_ hasUnread: Bool) -> AgentInfo {
@@ -146,7 +158,7 @@ struct AgentInfo: Identifiable, Sendable {
             workingDirectory: workingDirectory, elapsedTime: elapsedTime, status: status,
             sessionName: sessionName, sessionId: sessionId, lastActiveAt: lastActiveAt,
             hasUnread: hasUnread, terminalApp: terminalApp, turnOutcome: turnOutcome,
-            tokenUsage: tokenUsage
+            tokenUsage: tokenUsage, codexSocketPath: codexSocketPath, codexRolloutPath: codexRolloutPath
         )
     }
 

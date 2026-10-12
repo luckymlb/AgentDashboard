@@ -32,7 +32,7 @@ struct AgentRowView: View {
                             .fontWeight(.medium)
                             .lineLimit(1)
 
-                        if agent.status.isActive {
+                        if agent.status.isActive || agent.status == .unknown {
                             Text(agent.status.label)
                                 .font(.caption2)
                                 .foregroundColor(agent.status.color)
@@ -48,7 +48,8 @@ struct AgentRowView: View {
                                 .frame(width: 8, height: 8)
                         }
                     }
-                    Text(shortPath)
+                    Text(agent.tty.isEmpty && agent.codexSocketPath != nil
+                         ? "Codex 会话 · \(shortPath)" : shortPath)
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .lineLimit(1)
@@ -93,6 +94,7 @@ struct AgentRowView: View {
         }
         .buttonStyle(.plain)
         .disabled(isJumping)
+        .help(agent.tty.isEmpty && agent.codexSocketPath != nil ? "打开 Codex 聊天" : "跳转到终端")
         .onHover { hovering in
             isHovered = hovering
         }

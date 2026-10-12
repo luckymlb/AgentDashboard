@@ -23,13 +23,13 @@ enum TerminalJumpFailure: Error, Sendable, Equatable {
         case .targetRejected(.terminalUnknown), .terminalUnknown:
             return "无法识别该会话所在的终端。目前支持 iTerm2 和 Terminal。"
         case .targetRejected(.ttyMissing):
-            return "该会话没有可跳转的终端。桌面 Codex 会话暂不支持终端跳转。"
+            return "该会话没有可跳转的终端。请刷新列表后重试。"
         case .targetRejected:
-            return "原 Agent 进程已退出或发生变化。请刷新列表后重试。"
+            return "原 Agent 会话已关闭或发生变化。请刷新列表后重试。"
         case .invalidTTY:
             return "终端地址无效。请刷新列表后重试。"
         case .appNotRunning:
-            return "目标终端已关闭。请刷新列表后重试。"
+            return "目标应用已关闭或未安装。请刷新列表后重试。"
         case .sessionNotFound:
             return "找不到原终端标签页，它可能已关闭。请刷新列表后重试。"
         case .permissionDenied:
@@ -48,6 +48,18 @@ enum TerminalBridge {
 
     @MainActor
     static func activate(target: NotificationTarget) async -> TerminalJumpResult {
+        if target.agentType == .codex, target.originalTTY.isEmpty,
+           let socket = target.codexSocketPath, let id = target.sessionId {
+            let thread = await Task.detached { CodexRuntimeClient.readThread(id: id, socketPath: socket) }.value
+            guard thread != nil, let url = CodexRuntimeClient.threadURL(id: id) else {
+                return .failure(.targetRejected(.processMissing))
+            }
+            guard NSWorkspace.shared.urlForApplication(toOpen: url) != nil else {
+                return .failure(.appNotRunning)
+            }
+            onWillActivate?()
+            return NSWorkspace.shared.open(url) ? .success : .failure(.scriptFailed)
+        }
         let resolution = await Task.detached {
             NotificationTargetResolver.resolve(target)
         }.value
@@ -89,7 +101,7 @@ enum TerminalBridge {
     static func presentFailure(_ reason: TerminalJumpFailure) {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "无法跳转到终端"
+        alert.messageText = "无法打开会话"
         alert.informativeText = reason.message
         alert.alertStyle = .warning
         alert.addButton(withTitle: "好")

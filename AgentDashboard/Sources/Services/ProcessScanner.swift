@@ -45,8 +45,8 @@ class ProcessScanner: ObservableObject {
     // so no TTL — entries are dropped when the pid disappears from the scan.
     private var terminalAppCache: [Int: TerminalApp] = [:]
 
-    // codex session rollout path cache: pid -> sessionPath. 进程存活期间 session 文件不变,
-    // 所以无 TTL;pid 消失时在下轮扫描清理(同 terminalAppCache)。
+    // Codex 路径由明确身份/运行时重新核对；缓存仅用于服务不可用时兜底。
+    // pid 消失时清理，不能假定进程存活期间会话永远不变。
     private var codexSessionCache: [Int: String] = [:]
 
     /// 启动系统通知(授权请求 + 注册点击回调)。AppDelegate 启动时调一次。
@@ -212,21 +212,23 @@ class ProcessScanner: ObservableObject {
         }
     }
 
-    /// Codex 快速通道只观察已由完整扫描建立的一对一 pid → rollout 映射。
-    /// stat 没变化时不读文件、不枚举进程；变化时只解析对应的单个 rollout。
+    /// 快速通道只刷新完整扫描已发现的会话，不枚举进程。
+    /// 旧客户端仅在文件变化时解析；服务会话同时查询运行状态，防止旧日志覆盖审批/完成。
     private func refreshChangedCodexSessions() {
         guard !isScanning, !isCodexRefreshing else { return }
 
         let targets = agents.compactMap { agent -> CodexRefreshTarget? in
             guard agent.type == .codex,
-                  let path = codexSessionCache[agent.pid],
-                  let signature = codexRolloutSignatures[agent.pid] else { return nil }
+                  let path = agent.codexRolloutPath ?? codexSessionCache[agent.pid],
+                  let signature = codexRolloutSignatures[agent.pid]
+                    ?? CodexTranscriptReader.fileSignature(atPath: path) else { return nil }
             return CodexRefreshTarget(
                 agentId: agent.id,
                 pid: agent.pid,
                 processStartedAt: agent.processStartedAt,
                 path: path,
-                signature: signature
+                signature: signature,
+                socketPath: agent.codexSocketPath, sessionId: agent.sessionId
             )
         }
         guard !targets.isEmpty else { return }
@@ -238,8 +240,17 @@ class ProcessScanner: ObservableObject {
             var updates: [CodexRefreshUpdate] = []
             for target in targets {
                 guard let signature = CodexTranscriptReader.fileSignature(atPath: target.path),
-                      signature != target.signature,
-                      let state = reader.readState(transcriptPath: target.path) else { continue }
+                      signature != target.signature || target.socketPath != nil,
+                      var state = reader.readState(transcriptPath: target.path) else { continue }
+                if let socket = target.socketPath, let id = target.sessionId {
+                    guard let runtime = CodexRuntimeClient.readThread(id: id, socketPath: socket) else { continue }
+                    let status = runtime.status(transcript: state)
+                    state = CodexTranscriptReader.CodexState(
+                        sessionId: runtime.id, status: status, tokenUsage: state.tokenUsage,
+                        turnStart: status.isActive ? state.turnStart : nil,
+                        turnOutcome: status == .idle ? state.turnOutcome : nil
+                    )
+                }
                 updates.append(CodexRefreshUpdate(
                     target: target, signature: signature, state: state
                 ))
@@ -258,12 +269,12 @@ class ProcessScanner: ObservableObject {
                 var changed = false
                 let now = Date()
                 for update in completedUpdates {
-                    guard self.codexSessionCache[update.target.pid] == update.target.path,
-                          let index = refreshedAgents.firstIndex(where: {
+                    guard let index = refreshedAgents.firstIndex(where: {
                               $0.id == update.target.agentId
                                   && $0.pid == update.target.pid
                                   && $0.processStartedAt == update.target.processStartedAt
                                   && $0.type == .codex
+                                  && ($0.codexRolloutPath ?? self.codexSessionCache[$0.pid]) == update.target.path
                           }) else { continue }
                     let refreshed = Self.applyingCodexState(
                         update.state,
@@ -271,7 +282,9 @@ class ProcessScanner: ObservableObject {
                         to: refreshedAgents[index],
                         now: now
                     )
-                    self.codexRolloutSignatures[update.target.pid] = update.signature
+                    if update.target.pid != 0 {
+                        self.codexRolloutSignatures[update.target.pid] = update.signature
+                    }
                     // rollout 会为 token/遥测持续追加。面板隐藏时这些变化不应每秒
                     // 唤醒 SwiftUI；确认、完成、状态切换等语义变化仍立即发布。
                     if Self.shouldPublishCodexRefresh(
@@ -395,6 +408,8 @@ class ProcessScanner: ObservableObject {
         let processStartedAt: Date
         let path: String
         let signature: CodexTranscriptReader.FileSignature
+        let socketPath: String?
+        let sessionId: String?
     }
 
     private struct CodexRefreshUpdate: Sendable {
@@ -432,6 +447,9 @@ class ProcessScanner: ObservableObject {
             cwdCache: cwdCache, cacheTTL: cacheTTL, terminalAppCache: terminalAppCache
         )
         let allSessions = loadAllSessions(sessionsDir: sessionsDir)
+        let runtimeThreads = CodexRuntimeClient.loadedThreads()
+        let codexProcesses = terminalProcesses.processes.filter { $0.type == .codex }
+        var assignedRuntimeIDs: Set<String> = []
 
         var agents: [AgentInfo] = []
         var usedTranscriptPaths: Set<String> = []
@@ -459,12 +477,46 @@ class ProcessScanner: ObservableObject {
             if kind != nil && kind != "interactive" { continue }
 
             // codex:解析 session rollout 文件,拿到 状态 / token / 轮起始时间。
-            // 路径走 pid 缓存(进程存活期间不变);缓存未命中则按 cwd 在「今天」目录查找。
+            // 优先采用明确会话身份/运行时路径，旧客户端再使用保守文件匹配。
             var codexState: CodexTranscriptReader.CodexState?
             var codexSessionPath: String?
             var codexSignature: CodexTranscriptReader.FileSignature?
+            var runtimeThread: CodexRuntimeThread?
             if proc.type == .codex {
-                if let cached = newCodexSessionCache[proc.pid],
+                let explicitID = CodexSessionLocator.explicitThreadID(command: proc.command)
+                let openPath = CodexSessionLocator.openRollout(pid: proc.pid)
+                let candidates = runtimeThreads.filter {
+                    !assignedRuntimeIDs.contains($0.id)
+                        && (explicitID != nil ? $0.id == explicitID : $0.cwd == sessionCwd)
+                }
+                if let explicitID {
+                    runtimeThread = candidates.first { $0.id == explicitID }
+                    codexSessionPath = runtimeThread?.path ?? CodexSessionLocator.path(threadID: explicitID)
+                } else if let openPath {
+                    runtimeThread = candidates.first { $0.path == openPath }
+                    codexSessionPath = openPath
+                } else {
+                    // 新建终端会话仅在一对一且创建时间接近时关联；有歧义就独立
+                    // 展示服务会话，按准确 thread ID 跳转，绝不任选同目录文件。
+                    let terminalCandidates = candidates.filter { $0.originator == "codex-tui" }
+                    if terminalCandidates.count == 1,
+                       codexProcesses.filter({ $0.cwd == sessionCwd }).count == 1,
+                       abs(terminalCandidates[0].createdAt.timeIntervalSince(proc.startedAt)) <= 600 {
+                        runtimeThread = terminalCandidates[0]
+                        codexSessionPath = runtimeThread?.path
+                    }
+                }
+                if let runtimeThread { assignedRuntimeIDs.insert(runtimeThread.id) }
+                let hasRuntimeCandidates = runtimeThreads.contains { $0.cwd == sessionCwd }
+                if codexSessionPath != nil {
+                    newCodexSessionCache[proc.pid] = codexSessionPath
+                } else if runtimeThread != nil {
+                    // 临时会话可能尚未产生 rollout，运行状态仍由服务提供。
+                } else if hasRuntimeCandidates {
+                    // 无法证明终端与线程绑定时，下面按线程生成可准确跳转的会话。
+                    newCodexSessionCache.removeValue(forKey: proc.pid)
+                    continue
+                } else if let cached = newCodexSessionCache[proc.pid],
                    FileManager.default.fileExists(atPath: cached),
                    !assignedCodexSessionPaths.contains(cached) {
                     codexSessionPath = cached
@@ -477,7 +529,9 @@ class ProcessScanner: ObservableObject {
                     )
                     if let codexSessionPath { newCodexSessionCache[proc.pid] = codexSessionPath }
                 }
+                if let runtimeThread { sessionId = runtimeThread.id }
                 if let p = codexSessionPath {
+                    guard !assignedCodexSessionPaths.contains(p) else { continue }
                     assignedCodexSessionPaths.insert(p)
                     usedCodexTranscriptPaths.insert(p)
                     codexSignature = CodexTranscriptReader.fileSignature(atPath: p)
@@ -485,7 +539,7 @@ class ProcessScanner: ObservableObject {
                         codexRolloutSignatures[proc.pid] = codexSignature
                     }
                     codexState = codexReader.readState(transcriptPath: p)
-                    sessionId = codexState?.sessionId
+                    sessionId = runtimeThread?.id ?? codexState?.sessionId
                 }
             }
 
@@ -493,6 +547,8 @@ class ProcessScanner: ObservableObject {
 
             if let sid = sessionId, let hookStatus = hookStatuses[sid] {
                 status = hookStatus
+            } else if let runtimeThread {
+                status = runtimeThread.status(transcript: codexState)
             } else if let codexStatus = codexState?.status {
                 status = codexStatus
             } else if sessionStatus == "busy", let sid = sessionId {
@@ -510,7 +566,7 @@ class ProcessScanner: ObservableObject {
             } else if proc.type == .codex {
                 // codex 进程在但 session 暂时读不到(启动初期/文件未就绪):
                 // 视为等待输入,优于 CPU 兜底(初始化 CPU 高易误判 Running)。
-                status = .idle
+                status = .unknown
             } else if sessionStatus == nil {
                 status = cpuFallbackStatus(cpu: proc.cpu, stat: proc.stat)
             } else {
@@ -582,13 +638,30 @@ class ProcessScanner: ObservableObject {
                 workingDirectory: sessionCwd,
                 elapsedTime: elapsedTime,
                 status: status,
-                sessionName: sessionName,
+                sessionName: runtimeThread?.name ?? sessionName,
                 sessionId: sessionId,
                 lastActiveAt: lastActive,
                 hasUnread: false,
                 terminalApp: proc.terminalApp,
                 turnOutcome: codexState?.turnOutcome,
-                tokenUsage: tokenUsage
+                tokenUsage: tokenUsage,
+                codexSocketPath: runtimeThread?.socketPath, codexRolloutPath: codexSessionPath
+            ))
+        }
+
+        for thread in runtimeThreads where !assignedRuntimeIDs.contains(thread.id) {
+            let state = thread.path.flatMap { codexReader.readState(transcriptPath: $0) }
+            if let path = thread.path { usedCodexTranscriptPaths.insert(path) }
+            let status = thread.status(transcript: state)
+            let elapsed = status.isActive ? state?.turnStart.map {
+                formatSeconds(max(0, Int(Date().timeIntervalSince($0))))
+            } ?? "" : ""
+            agents.append(AgentInfo(
+                pid: 0, processStartedAt: thread.createdAt, type: .codex, tty: "",
+                workingDirectory: thread.cwd, elapsedTime: elapsed, status: status,
+                sessionName: thread.name, sessionId: thread.id, lastActiveAt: thread.updatedAt,
+                terminalApp: .unknown, turnOutcome: status == .idle ? state?.turnOutcome : nil,
+                tokenUsage: state?.tokenUsage, codexSocketPath: thread.socketPath, codexRolloutPath: thread.path
             ))
         }
 
@@ -646,7 +719,8 @@ class ProcessScanner: ObservableObject {
             hasUnread: agent.hasUnread,
             terminalApp: agent.terminalApp,
             turnOutcome: state.turnOutcome,
-            tokenUsage: state.tokenUsage ?? agent.tokenUsage
+            tokenUsage: state.tokenUsage ?? agent.tokenUsage,
+            codexSocketPath: agent.codexSocketPath, codexRolloutPath: agent.codexRolloutPath
         )
     }
 
@@ -864,7 +938,7 @@ class ProcessScanner: ObservableObject {
     /// 但它不是任务完成，必须在通知层明确排除。
     nonisolated static func shouldNotifyCompletion(oldAgent: AgentInfo, newAgent: AgentInfo) -> Bool {
         oldAgent.status.isActive
-            && !newAgent.status.isActive
+            && newAgent.status == .idle
             && oldAgent.elapsedSeconds > 30
             && newAgent.turnOutcome != .aborted
     }
@@ -878,7 +952,7 @@ class ProcessScanner: ObservableObject {
               oldSessionId == newAgent.sessionId,
               oldAgent.type == newAgent.type,
               oldAgent.status.isActive,
-              !newAgent.status.isActive else { return false }
+              newAgent.status == .idle else { return false }
 
         switch newAgent.type {
         case .claude:
@@ -911,6 +985,7 @@ class ProcessScanner: ObservableObject {
         let type: AgentType
         let cwd: String
         let terminalApp: TerminalApp
+        let command: String
     }
 
     private struct ProcessScanOutput {
@@ -994,7 +1069,7 @@ class ProcessScanner: ObservableObject {
                 pid: pid, tty: tty, stat: stat, cpu: cpu,
                 etime: formatElapsedTime(etime), startedAt: startedAt, type: type,
                 cwd: cwd.isEmpty ? "unknown" : cwd,
-                terminalApp: terminalApp
+                terminalApp: terminalApp, command: parts[5...].joined(separator: " ")
             ))
         }
 
@@ -1015,7 +1090,9 @@ class ProcessScanner: ObservableObject {
         guard parts.count >= 6 else { return false }
         let command = parts[5...].joined(separator: " ")
         // 新版 Codex CLI 直接以 `codex` 运行;旧版为 `node /path/codex`。两种格式都需识别。
-        let isCodex = command == "codex"
+        let executable = parts[5] as NSString
+        let isCodex = executable.lastPathComponent == "codex"
+            || command == "codex"
             || command.hasPrefix("codex ")
             || (command.hasPrefix("node") && command.contains("/codex"))
         return isCodex

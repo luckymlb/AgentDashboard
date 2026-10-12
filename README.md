@@ -25,7 +25,7 @@ AgentDashboard 在本机读取终端进程和会话状态，不主动上传会�
 
 ## 核心功能
 
-- **统一监控 Claude 与 Codex**：自动发现正在终端中运行的交互式 Agent
+- **统一监控 Claude 与 Codex**：自动发现终端 Agent，以及现有 Codex 本地服务中加载的主会话
 - **细粒度状态**：显示 Thinking、Running、Reading、Editing、Confirming 等状态
 - **授权提醒**：出现 Yes / No 权限确认时，菜单栏图标和对应 Agent 会变为橙色
 - **Token 统计**：显示 Claude 和 Codex 的累计 Token，悬停可查看分项
@@ -152,7 +152,7 @@ Codex 无需额外配置。Claude Code 建议配置 Hooks，以获得更及时�
 | 中文目录 | 支持 | 支持 |
 | 额外配置 | 推荐配置 Hooks | 无需配置 |
 
-Claude 配置 Hooks 后，状态通常会立即更新。Codex 状态来自本地 session rollout，会随 Dashboard 的轮询周期更新：面板打开时约每 2 秒一次，后台约每 10 秒一次。
+Claude 配置 Hooks 后，状态通常会立即更新。Codex 优先读取现有 app-server 的会话身份和运行状态，并从 rollout 补充细粒度活动与 Token。已发现会话约每秒刷新；新会话发现周期为面板打开时约 2 秒、后台约 10 秒。不会启动服务、恢复会话或代替用户答复审批。
 
 ## 使用方法
 
@@ -183,6 +183,7 @@ Claude 配置 Hooks 后，状态通常会立即更新。Codex 状态来自本地
 | Processing | 薄荷色 | 正在执行 Agent、Workflow 等子任务 |
 | Busy | 绿色 | 正在工作，但无法进一步识别具体类型 |
 | Waiting / Idle | 灰色 | 等待输入或任务已结束 |
+| Unknown | 灰色 | 当前数据不足以确定状态 |
 
 ## Token 统计
 
@@ -237,8 +238,9 @@ swift --version
 ## 当前限制
 
 - 仅支持 macOS 13 及以上版本
-- 仅支持 iTerm2 和 Terminal.app 的标签页跳转
-- 仅监控带 TTY 的交互式 Claude Code / Codex CLI 进程
+- 终端跳转支持 iTerm2 和 Terminal.app；无 TTY 的 Codex 服务会话使用 `codex://threads/<thread-id>` 打开聊天
+- 终端监控需要 TTY；桌面会话发现需要客户端暴露现有本地 app-server Unix socket，默认读取 `~/.codex/app-server-control/app-server-control.sock`
+- 支持 `CODEX_HOME`；自定义服务端点可通过 `AGENTDASHBOARD_CODEX_SOCKET` 指定。旧版只暴露私有 stdio 的桌面客户端不提供可只读查询的会话入口
 - Codex 状态依赖其本地 session 格式；Codex CLI 大版本更新后可能需要适配
 - 未配置 Claude Hooks 时，状态精度和更新速度会降低
 

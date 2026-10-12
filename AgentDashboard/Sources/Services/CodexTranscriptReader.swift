@@ -57,6 +57,8 @@ final class CodexTranscriptReader: @unchecked Sendable {
         let sessionId: String?
         let cwd: String
         let startedAt: Date?
+        var source: String? = nil
+        var isSubagent: Bool = false
     }
 
     /// 尚未收到对应 output 的普通工具调用。sequence 用于并行调用时稳定选择
@@ -87,7 +89,7 @@ final class CodexTranscriptReader: @unchecked Sendable {
     /// 扫最近 7 天并额外包含进程启动日,支持长期存活的 Codex。
     func findSessionPath(cwd: String, processStartedAt: Date, excluding: Set<String>) -> String? {
         let cal = Calendar.current
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let home = CodexRuntimeClient.codexHome.path
         var candidates: [SessionCandidate] = []
         var totalRollouts = 0
         var directories: Set<String> = []
@@ -96,7 +98,7 @@ final class CodexTranscriptReader: @unchecked Sendable {
         for day in recentDays + [processStartedAt] {
             let comps = cal.dateComponents([.year, .month, .day], from: day)
             guard let y = comps.year, let m = comps.month, let d = comps.day else { continue }
-            let dir = String(format: "%@/.codex/sessions/%04d/%02d/%02d", home, y, m, d)
+            let dir = String(format: "%@/sessions/%04d/%02d/%02d", home, y, m, d)
             guard directories.insert(dir).inserted else { continue }
             guard let entries = try? FileManager.default.contentsOfDirectory(atPath: dir) else { continue }
             let rollouts = entries.filter { $0.hasPrefix("rollout-") && $0.hasSuffix(".jsonl") }
@@ -104,7 +106,8 @@ final class CodexTranscriptReader: @unchecked Sendable {
 
             for name in rollouts {
                 let path = "\(dir)/\(name)"
-                guard let metadata = readSessionMetadata(path: path), metadata.cwd == cwd else { continue }
+                guard let metadata = readSessionMetadata(path: path), metadata.cwd == cwd,
+                      !metadata.isSubagent, metadata.source == nil || metadata.source == "cli" else { continue }
                 let attrs = try? FileManager.default.attributesOfItem(atPath: path)
                 let mtime = (attrs?[.modificationDate] as? Date) ?? Date.distantPast
                 let startedAt = metadata.startedAt
@@ -132,7 +135,12 @@ final class CodexTranscriptReader: @unchecked Sendable {
             if lhsDelta != rhsDelta { return lhsDelta < rhsDelta }
             return $0.mtime > $1.mtime
         }) else { return nil }
-        guard abs(best.startedAt.timeIntervalSince(processStartedAt)) <= 10 * 60 else { return nil }
+        let bestDelta = abs(best.startedAt.timeIntervalSince(processStartedAt))
+        guard bestDelta <= 10 * 60 else { return nil }
+        // 时间仅用于旧客户端兜底，秒级差异无法证明多实例身份。
+        guard !available.contains(where: {
+            $0.path != best.path && abs(abs($0.startedAt.timeIntervalSince(processStartedAt)) - bestDelta) <= 3
+        }) else { return nil }
         return best.path
     }
 
@@ -185,7 +193,17 @@ final class CodexTranscriptReader: @unchecked Sendable {
         let startedAt = timestampMatch
             .flatMap { Range($0.range(at: 1), in: str) }
             .flatMap { Self.isoFormatter.date(from: String(str[$0])) }
-        return SessionMetadata(sessionId: sessionId, cwd: cwd, startedAt: startedAt)
+        if sessionId == nil {
+            let regex = try! NSRegularExpression(pattern: #""id"\s*:\s*"([^"\\]+)""#)
+            if let match = regex.firstMatch(in: str, range: range),
+               let r = Range(match.range(at: 1), in: str) { sessionId = String(str[r]) }
+        }
+        let sourceRegex = try! NSRegularExpression(pattern: #""source"\s*:\s*"([^"\\]+)""#)
+        let source = sourceRegex.firstMatch(in: str, range: range)
+            .flatMap { Range($0.range(at: 1), in: str) }.map { String(str[$0]) }
+        let subagentRegex = try! NSRegularExpression(pattern: #""source"\s*:\s*\{\s*"subagent""#)
+        return SessionMetadata(sessionId: sessionId, cwd: cwd, startedAt: startedAt,
+                               source: source, isSubagent: subagentRegex.firstMatch(in: str, range: range) != nil)
     }
 
     /// 简易 JSON 字符串反转义(macOS 路径常见 \" \\ \/,其余Unicode原样保留)。
@@ -315,6 +333,13 @@ final class CodexTranscriptReader: @unchecked Sendable {
             }
 
             if type == "response_item", let pt = payload?["type"] as? String {
+                if pt == "reasoning" { lastEventMsgType = "reasoning" }
+                if pt == "message", payload?["role"] as? String == "assistant" {
+                    lastEventMsgType = "agent_message"
+                }
+                if pt == "message", payload?["role"] as? String == "user" {
+                    lastEventMsgType = "user_message"
+                }
                 if pt == "function_call" || pt == "custom_tool_call" {
                     // Legacy function_call stores JSON in `arguments`; current
                     // custom_tool_call stores the same tool input in `input`.
@@ -354,7 +379,14 @@ final class CodexTranscriptReader: @unchecked Sendable {
             // token_count 只是遥测，工具专用的 *_end 紧跟在 response_item output
             // 附近；它们都不应覆盖最后一个语义事件。否则工具刚结束会短暂回跳
             // Running，而不是恢复到模型生成状态。
-            if !Self.nonSemanticEventTypes.contains(pt) {
+            if pt == "item_completed", let item = payload?["item"] as? [String: Any] {
+                switch item["type"] as? String {
+                case "Reasoning", "reasoning": lastEventMsgType = "reasoning"
+                case "AgentMessage", "agentMessage": lastEventMsgType = "agent_message"
+                case "UserMessage", "userMessage": lastEventMsgType = "user_message"
+                default: break
+                }
+            } else if !Self.nonSemanticEventTypes.contains(pt) {
                 lastEventMsgType = pt
             }
 
@@ -423,7 +455,7 @@ final class CodexTranscriptReader: @unchecked Sendable {
         } else {
             switch lastType {
             case "task_complete":                  status = .idle
-            case "user_message":                   status = .thinking
+            case "user_message", "reasoning":      status = .thinking
             case "agent_message":                  status = .crafting
             case "sub_agent_activity":             status = .processing
             default:                               status = .running   // task_started / turn_context 等
@@ -462,7 +494,7 @@ final class CodexTranscriptReader: @unchecked Sendable {
 
     private static let nonSemanticEventTypes: Set<String> = [
         "thread_rolled_back", "token_count", "patch_apply_end",
-        "web_search_end", "mcp_tool_call_end",
+        "web_search_end", "mcp_tool_call_end", "thread_settings_applied",
     ]
 
     static func isInteractiveTool(_ toolName: String?) -> Bool {
@@ -809,17 +841,19 @@ final class CodexTranscriptReader: @unchecked Sendable {
     }
 
     /// codex total_token_usage → TokenUsage。
-    /// 保证 total == codex total_tokens:input 拆出 cached 部分,reasoning 折进 output。
+    /// 保证 total == codex total_tokens:input 拆出 cached 部分，output 已包含 reasoning。
     static func usage(from d: [String: Any]) -> TokenUsage {
         let input = intField(d, "input_tokens")
         let cached = intField(d, "cached_input_tokens")
         let output = intField(d, "output_tokens")
-        let reasoning = intField(d, "reasoning_output_tokens")
+        // reasoning_output_tokens 是 output_tokens 的子集，不能再次相加。
+        let total = d["total_tokens"] as? NSNumber
+        let authoritativeOutput = total.map { max(0, $0.intValue - input) } ?? output
         return TokenUsage(
             inputTokens: max(0, input - cached),
             cacheCreationTokens: 0,
             cacheReadTokens: cached,
-            outputTokens: output + reasoning,
+            outputTokens: authoritativeOutput,
             model: "codex"
         )
     }
