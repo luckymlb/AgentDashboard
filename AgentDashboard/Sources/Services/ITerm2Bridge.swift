@@ -1,54 +1,8 @@
 import Foundation
-import os
 
-private let logger = Logger(subsystem: "com.lucky.AgentDashboard", category: "ITerm2Bridge")
 
-enum ITerm2Error: Error {
-    case invalidTTY
-    case scriptFailed(String)
-    case sessionNotFound
-}
-
-class ITerm2Bridge {
+enum ITerm2Bridge {
     private static let ttyPattern = try! NSRegularExpression(pattern: #"^(/dev/)?ttys\d+$"#)
-
-    static func activateSession(tty: String) {
-        guard let script = activationScript(tty: tty) else {
-            logger.error("Invalid tty format rejected: \(tty)")
-            return
-        }
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            let process = Process()
-            let outPipe = Pipe()
-            let errPipe = Pipe()
-
-            process.standardOutput = outPipe
-            process.standardError = errPipe
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            process.arguments = ["-e", script]
-
-            do {
-                try process.run()
-                let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-                process.waitUntilExit()
-
-                let output = String(data: outData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-                if process.terminationStatus != 0 {
-                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                    let errMsg = String(data: errData, encoding: .utf8) ?? "unknown"
-                    logger.error("osascript failed (exit \(process.terminationStatus)): \(errMsg)")
-                } else if output == "not_found" {
-                    logger.info("iTerm2 session not found for tty: \(tty)")
-                } else {
-                    logger.debug("iTerm2 session activated for tty: \(tty)")
-                }
-            } catch {
-                logger.error("Failed to launch osascript: \(error.localizedDescription)")
-            }
-        }
-    }
 
     /// 返回 nil 表示 tty 未通过白名单校验。保留为 internal 供脚本回归测试使用。
     static func activationScript(tty: String) -> String? {
@@ -63,6 +17,7 @@ class ITerm2Bridge {
                         if tty of s is "\(devicePath)" then
                             tell s to select
                             tell t to select
+                            set miniaturized of w to false
                             tell w to select
                             activate
                             return "ok"

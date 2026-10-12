@@ -51,6 +51,9 @@ class ProcessScanner: ObservableObject {
 
     /// 启动系统通知(授权请求 + 注册点击回调)。AppDelegate 启动时调一次。
     func startNotifications() {
+        notificationManager.onJumpSucceeded = { [weak self] target in
+            self?.markAsRead(sessionId: target.sessionId)
+        }
         notificationManager.start()
     }
 

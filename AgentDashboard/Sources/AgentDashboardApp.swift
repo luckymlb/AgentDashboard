@@ -43,6 +43,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         )
         hostingController.sizingOptions = [.preferredContentSize]
         popover.contentViewController = hostingController
+        TerminalBridge.onWillActivate = { [weak self] in
+            self?.popover.performClose(nil)
+        }
 
         // Drive menu bar icon + badge directly from @Published agents.
         // 有 agent 等权限确认时,图标切红色感叹号醒目提示。

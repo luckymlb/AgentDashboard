@@ -26,6 +26,8 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     /// 进程退出时清理该 Agent 在本次 App 生命周期内创建的所有通知。
     private var notificationIdentifiersByAgent: [String: Set<String>] = [:]
 
+    var onJumpSucceeded: ((NotificationTarget) -> Void)?
+
     private var authorized = false
 
     func start() {
@@ -121,18 +123,18 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             return
         }
 
-        let resolution = NotificationTargetResolver.resolve(target)
+        // 验证和 AppleScript 都异步执行；尽快释放系统通知回调。
+        completionHandler()
         Task { @MainActor in
-            switch resolution {
-            case let .destination(tty, terminalApp):
-                logger.info("通知目标验证通过 pid=\(target.pid) tty=\(tty, privacy: .public) app=\(terminalApp.rawValue, privacy: .public)")
-                TerminalBridge.activate(tty: tty, app: terminalApp)
-            case let .rejected(reason):
-                logger.warning("拒绝失效通知跳转 pid=\(target.pid) reason=\(reason.rawValue, privacy: .public)")
+            let result = await TerminalBridge.activate(target: target)
+            switch result {
+            case .success:
+                self.onJumpSucceeded?(target)
+            case let .failure(reason):
                 center.removePendingNotificationRequests(withIdentifiers: [identifier])
                 center.removeDeliveredNotifications(withIdentifiers: [identifier])
+                TerminalBridge.presentFailure(reason)
             }
-            completionHandler()
         }
     }
 

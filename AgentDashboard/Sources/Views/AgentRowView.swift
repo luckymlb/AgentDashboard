@@ -3,14 +3,24 @@ import SwiftUI
 struct AgentRowView: View {
     let agent: AgentInfo
     var onRead: (() -> Void)?
+    @State private var isJumping = false
     @State private var isHovered = false
     @State private var showTokenInfo = false
     @State private var infoHoverTask: Task<Void, Never>?
 
     var body: some View {
         Button(action: {
-            onRead?()
-            TerminalBridge.activate(tty: agent.tty, app: agent.terminalApp)
+            guard !isJumping else { return }
+            isJumping = true
+            Task { @MainActor in
+                let result = await TerminalBridge.activate(target: NotificationTarget(agent: agent))
+                isJumping = false
+                if result == .success {
+                    onRead?()
+                } else if case let .failure(reason) = result {
+                    TerminalBridge.presentFailure(reason)
+                }
+            }
         }) {
             HStack(spacing: 8) {
                 StatusBadge(status: agent.status)
@@ -82,6 +92,7 @@ struct AgentRowView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(isJumping)
         .onHover { hovering in
             isHovered = hovering
         }

@@ -24,4 +24,18 @@ final class TerminalBridgeScriptTests: XCTestCase {
         XCTAssertNil(ITerm2Bridge.activationScript(tty: "ttys008\" & do shell script \"id"))
         XCTAssertNil(TerminalAppBridge.activationScript(tty: "ttys005; rm -rf /"))
     }
+    func testOnlyExplicitScriptSuccessCountsAsActivated() {
+        XCTAssertEqual(TerminalScriptRunner.interpret(exitCode: 0, output: "ok"), .success)
+        XCTAssertEqual(TerminalScriptRunner.interpret(exitCode: 0, output: "not_found"), .failure(.sessionNotFound))
+        XCTAssertEqual(TerminalScriptRunner.interpret(exitCode: 0, output: ""), .failure(.scriptFailed))
+        XCTAssertEqual(TerminalScriptRunner.interpret(exitCode: 1, output: "ok"), .failure(.scriptFailed))
+    }
+
+    func testAutomationPermissionFailureHasActionableReason() {
+        XCTAssertEqual(
+            TerminalScriptRunner.interpret(exitCode: 1, output: "Not authorized to send Apple events. (-1743)"),
+            .failure(.permissionDenied)
+        )
+    }
+
 }
